@@ -1,0 +1,16 @@
+# FLUX.2 generation and standard metric environment.
+
+torch==2.7.0
+torchvision==0.22.0
+diffusers==0.37.1
+transformers==4.56.2
+accelerate==1.10.1
+
+numpy==2.0.1
+pillow==11.0.0
+pyyaml==6.0.3
+matplotlib
+
+lpips==0.1.4
+dreamsim==0.2.1
+vendi-score

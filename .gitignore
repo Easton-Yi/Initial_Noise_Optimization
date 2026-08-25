@@ -4,12 +4,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .venv/
+.venv-generation
+.venv-metrics
 venv/
 
 # Experiment artefacts and heavyweight local caches
 noise_init/outputs/
 noise_init/cache/
 noise_init/.cache/
+logs
 *.pt
 *.pth
 *.safetensors
