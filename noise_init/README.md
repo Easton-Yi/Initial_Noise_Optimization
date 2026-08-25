@@ -56,7 +56,7 @@ These commands run the complete white-to-pink-0.7 alpha sweep because they omit 
 
 The final comparison must use one frozen formal block manifest, matched base-noise batches, generation configuration, normalization profile, and metric versions. The simplest workflow is one fresh full run; do not append proposed methods to a completed baseline-only run because its run manifest is immutable.
 
-`configs/flux2_klein_full.yaml` is the frozen full-grid configuration: it enables the complete baseline alpha sweep and both proposed methods at every intermediate gamma. Before validation, create the approved `manifests/blocks_formal.jsonl` and keep it immutable. **Do not point the full configuration at `blocks_pilot.jsonl`, and do not run the formal grid using the checked-in two-block pilot manifest.** See [manifests/README.md](manifests/README.md) for the JSONL contract.
+`configs/flux2_klein_full.yaml` is the frozen full-grid configuration: it enables the complete baseline alpha sweep and both proposed methods at every intermediate gamma. It points to the checked-in six-block `manifests/blocks_formal.jsonl` (two prompts × three seed batches). Review and, if needed, extend that manifest before validation; then keep the approved version immutable. **Do not point the full configuration at `blocks_pilot.jsonl`, and do not run the formal grid using the checked-in two-block pilot manifest.** See [manifests/README.md](manifests/README.md) for the JSONL contract.
 
 Then run the **entire** final grid—one shared eight-point baseline curve, nine same-phase alpha-sweep curves, and nine independent-white alpha-sweep curves—over the frozen formal block manifest:
 
