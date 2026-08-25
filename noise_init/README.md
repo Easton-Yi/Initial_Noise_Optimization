@@ -17,18 +17,22 @@ export HF_TOKEN=...  # required if the FLUX checkpoint is gated for this account
 python3 run_experiment.py --config configs/flux2_klein.yaml --stage validate
 ```
 
-## 1. One-prompt smoke test
+## Optional preflight checks
 
-This is only a preflight check: it generates exactly eight PNG images (four white and four pink `alpha=0.5`) plus two 1×4 grids. It is not a baseline result and must not be used for the final Q–D curve.
+These checks are recommended in a new environment but are not part of the formal experiment. They may be skipped after the implementation, environment, and model adapter have already been validated.
 
 ```bash
+# CPU acceptance tests
+python3 -m unittest discover -s tests -v
+
+# One-prompt smoke test: eight PNGs and two 1×4 grids
 python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --prompt "A photo of a red fox in snow" --batch-seed 10000 --conditions white,pink:0.5 --run-id flux_smoke
 python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux_smoke
 ```
 
-Confirm that the smoke output contains the expected image/hash/provenance records before continuing. Do not run `analyze` for this deliberately incomplete two-condition smoke run.
+Do not run `analyze` for this deliberately incomplete two-condition smoke run.
 
-## 2. Optional FLUX.2 Klein baseline pilot: white through pink 0.7
+## Optional FLUX.2 Klein baseline pilot: white through pink 0.7
 
 `configs/flux2_klein.yaml` selects the primary model, **FLUX.2 Klein 4B, BF16, 1024×1024, four inference steps**, and enables all eight matched baseline conditions:
 
@@ -36,7 +40,7 @@ Confirm that the smoke output contains the expected image/hash/provenance record
 white (= alpha 0.0), pink alpha = 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7
 ```
 
-The checked-in two-block `manifests/blocks.jsonl` is a pilot example. Use this step only with a deliberately small pilot manifest to validate the baseline procedure and inspect basic behaviour.
+`configs/flux2_klein.yaml` explicitly uses the checked-in two-block `manifests/blocks_pilot.jsonl`. Use this step only with a deliberately small pilot manifest to validate the baseline procedure and inspect basic behaviour.
 
 For an optional small baseline pilot, use the explicit pilot run ID:
 
@@ -48,29 +52,11 @@ python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --ru
 
 These commands run the complete white-to-pink-0.7 alpha sweep because they omit `--conditions`. The proposed-method experiment is a full alpha sweep at every intermediate gamma, not an anchor-alpha sweep. Do not run this baseline-only configuration over the full formal manifest as a required pre-step: the full experiment below already generates its matched formal baseline once.
 
-## 3. Formal FLUX.2 comparison: baseline + both proposed initial-noise methods
+## Formal FLUX.2 comparison: baseline + both proposed initial-noise methods
 
 The final comparison must use one frozen formal block manifest, matched base-noise batches, generation configuration, normalization profile, and metric versions. The simplest workflow is one fresh full run; do not append proposed methods to a completed baseline-only run because its run manifest is immutable.
 
-Make a copy of the baseline config and freeze the full proposed-method grid, for example:
-
-```bash
-cp configs/flux2_klein.yaml configs/flux2_klein_full.yaml
-```
-
-Set a new `experiment.name` and enable both methods using the complete baseline alpha grid crossed with the nine non-degenerate intermediate gamma values:
-
-```yaml
-same_phase_floor:
-  enabled: true
-  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
-  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-
-independent_white:
-  enabled: true
-  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
-  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-```
+`configs/flux2_klein_full.yaml` is the frozen full-grid configuration: it enables the complete baseline alpha sweep and both proposed methods at every intermediate gamma. Before validation, create the approved `manifests/blocks_formal.jsonl` and keep it immutable. **Do not point the full configuration at `blocks_pilot.jsonl`, and do not run the formal grid using the checked-in two-block pilot manifest.** See [manifests/README.md](manifests/README.md) for the JSONL contract.
 
 Then run the **entire** final grid—one shared eight-point baseline curve, nine same-phase alpha-sweep curves, and nine independent-white alpha-sweep curves—over the frozen formal block manifest:
 
@@ -89,23 +75,10 @@ Do not use `--conditions` for this formal run: it is only for controlled smoke s
 
 `--force` can recreate derived metric outputs but cannot replace a cached source-noise batch, generated PNG, or immutable run configuration. Use a new `--run-id` for a deliberately new experiment.
 
-CPU acceptance tests:
+## Minimum formal run order
 
 ```bash
-python3 -m unittest discover -s tests -v
-```
-
-## Formal run order
-
-```bash
-# 1. CPU tests
-python3 -m unittest discover -s tests -v
-
-# 2. One-prompt smoke test (then optionally run a deliberately small pilot)
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --prompt "A photo of a red fox in snow" --batch-seed 10000 --conditions white,pink:0.5 --run-id flux_smoke
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux_smoke
-
-# 3. Validate and run the frozen full-grid formal configuration once
+# Validate first: blocks_formal.jsonl must exist and contain approved blocks.
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage validate
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full

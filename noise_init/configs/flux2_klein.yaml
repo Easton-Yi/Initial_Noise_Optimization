@@ -21,7 +21,7 @@ generation:
   generation_batch_size: 1
   release_model_after_generation: true
   output_format: png
-blocks: {manifest: manifests/blocks.jsonl}
+blocks: {manifest: manifests/blocks_pilot.jsonl}
 baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
 same_phase_floor: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
 independent_white: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}

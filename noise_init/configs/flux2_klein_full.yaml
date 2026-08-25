@@ -1,23 +1,30 @@
 experiment:
-  name: sdxl_turbo_initial_noise_qd
+  name: flux2_full
   master_seed: 20260825
   gallery_size: 4
   normalization_profile: per_sample_per_channel_zero_mean_unit_std
-paths: {outputs_root: outputs}
+paths:
+  outputs_root: outputs
 model:
-  adapter: sdxl_turbo
-  checkpoint: stabilityai/sdxl-turbo
-  vae_checkpoint: madebyollin/sdxl-vae-fp16-fix
+  adapter: flux2_klein
+  checkpoint: black-forest-labs/FLUX.2-klein-4B
   revision: null
-  dtype: float16
+  dtype: bfloat16
   device: cuda
   cpu_offload: false
   cache_dir: cache
-generation: {height: 512, width: 512, num_inference_steps: 1, guidance_scale: 0.0, generation_batch_size: 1, release_model_after_generation: true, output_format: png}
-blocks: {manifest: manifests/blocks_pilot.jsonl}
+generation:
+  height: 1024
+  width: 1024
+  num_inference_steps: 4
+  guidance_scale: 1.0
+  generation_batch_size: 1
+  release_model_after_generation: true
+  output_format: png
+blocks: {manifest: manifests/blocks_formal.jsonl}
 baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
-same_phase_floor: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
-independent_white: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
+same_phase_floor: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
+independent_white: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
 quality_metrics:
   clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
   hpsv3: {enabled: true, checkpoint: official_default}
