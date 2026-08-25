@@ -1,0 +1,19 @@
+# Base generation/metric environment.  HPSv3 is intentionally a separate
+# optional metric-stage dependency because its official transformer pin can
+# differ from the Diffusers generation environment.
+torch==2.7.0
+torchvision==0.22.0
+diffusers==0.37.1
+transformers==4.56.2
+accelerate==1.10.1
+numpy==2.0.1
+pillow==11.0.0
+pyyaml==6.0.3
+matplotlib
+lpips==0.1.4
+dreamsim==0.2.1
+vendi-score
+
+# Install HPSv3 in the dedicated metric environment exactly as documented by
+# https://github.com/MizzenAI/HPSv3, then run only the `metrics` stage there.
+hpsv3

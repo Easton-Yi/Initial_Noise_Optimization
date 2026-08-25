@@ -1,0 +1,36 @@
+experiment:
+  name: flux2_klein_initial_noise_qd
+  master_seed: 20260825
+  gallery_size: 4
+  normalization_profile: per_sample_per_channel_zero_mean_unit_std
+paths:
+  outputs_root: outputs
+model:
+  adapter: flux2_klein
+  checkpoint: black-forest-labs/FLUX.2-klein-4B
+  revision: null
+  dtype: bfloat16
+  device: cuda
+  cpu_offload: false
+  cache_dir: ../../divgen/cache
+generation:
+  height: 1024
+  width: 1024
+  num_inference_steps: 4
+  guidance_scale: 1.0
+  generation_batch_size: 1
+  release_model_after_generation: true
+  output_format: png
+blocks: {manifest: manifests/blocks.jsonl}
+baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+same_phase_floor: {enabled: false, alpha_values: [0.5], gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]}
+independent_white: {enabled: false, alpha_values: [0.5], gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]}
+quality_metrics:
+  clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
+  hpsv3: {enabled: true, checkpoint: official_default}
+  maniqa: {enabled: false}
+diversity_metrics:
+  dreamsim: {enabled: true, checkpoint: official_default, aggregation: mean_unordered_pair_distance}
+  lpips: {enabled: true, backbone: alex, aggregation: mean_unordered_pair_distance}
+  vendi_clip: {enabled: true, embedding_checkpoint: openai/clip-vit-large-patch14}
+analysis: {bootstrap_replicates: 2000, bootstrap_seed: 20260825, confidence_level: 0.95, compare_on_pareto_frontier: true, prohibit_extrapolation: true}
