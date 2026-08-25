@@ -1,8 +1,8 @@
 """Deterministic initial-noise construction.
 
 ``alpha`` is an amplitude-spectrum exponent: expected PSD of pink noise is
-proportional to ``(1 + r)**(-2 * alpha)``.  FFT frequency units are normalized
-cycles per pixel, consistently for every method in this module.
+proportional to ``(1 + r)**(-2 * alpha)``. ``r`` uses integer FFT-bin index
+units, matching DivGen: ``fftfreq(H) * H`` and ``rfftfreq(W) * W``.
 """
 from __future__ import annotations
 
@@ -28,8 +28,9 @@ class NoiseBatch:
 
 
 def radial_frequency_grid(height: int, width: int, *, device: torch.device | str = "cpu") -> torch.Tensor:
-    fy = torch.fft.fftfreq(height, device=device, dtype=torch.float32).view(height, 1)
-    fx = torch.fft.rfftfreq(width, device=device, dtype=torch.float32).view(1, width // 2 + 1)
+    """Radial frequency in DivGen's integer FFT-bin index units."""
+    fy = torch.fft.fftfreq(height, device=device, dtype=torch.float32).view(height, 1) * height
+    fx = torch.fft.rfftfreq(width, device=device, dtype=torch.float32).view(1, width // 2 + 1) * width
     return torch.sqrt(fy.square() + fx.square())
 
 

@@ -19,6 +19,7 @@ from noise_methods import construct_noise, load_or_create_noise_batch, noise_sta
 
 
 REQUIRED_TOP_LEVEL = {"experiment", "model", "generation", "blocks", "baseline", "same_phase_floor", "independent_white", "quality_metrics", "diversity_metrics", "analysis"}
+NOISE_FREQUENCY_GRID_VERSION = "divgen_integer_fft_bin_indices_v1"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     if not isinstance(config, dict): raise ValueError("YAML root must be a mapping")
+    # This is provenance, not a tunable parameter. It deliberately invalidates
+    # runs made with the earlier normalized-frequency implementation.
+    config.setdefault("experiment", {}).setdefault("noise_frequency_grid", NOISE_FREQUENCY_GRID_VERSION)
     # Paths in checked-in YAML are relative to the independent noise_init root,
     # not to the caller's shell directory or an adjacent DivGen checkout.
     cache_dir = config.get("model", {}).get("cache_dir")
@@ -55,6 +59,7 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     missing = REQUIRED_TOP_LEVEL - set(config)
     if missing: raise ValueError(f"Config missing sections: {sorted(missing)}")
     if config["experiment"]["gallery_size"] != 4: raise ValueError("This experiment contract requires gallery_size=4")
+    if config["experiment"].get("noise_frequency_grid") != NOISE_FREQUENCY_GRID_VERSION: raise ValueError("Only DivGen integer FFT-bin frequency coordinates are supported")
     if config["experiment"]["normalization_profile"] not in {"per_sample_per_channel_zero_mean_unit_std", "divgen_compat", "none"}: raise ValueError("Invalid normalization profile")
     if config["model"]["adapter"] not in {"flux2_klein", "sdxl_turbo"}: raise ValueError("Only flux2_klein and sdxl_turbo adapters are supported")
     if config["diversity_metrics"]["vendi_clip"].get("enabled", False) and config["diversity_metrics"]["vendi_clip"]["embedding_checkpoint"] != config["quality_metrics"]["clip"]["checkpoint"]:
@@ -211,6 +216,10 @@ def main() -> None:
     run_dir = _run_dir(config, config_path, args.run_id)
     if args.stage in ("generate", "all"):
         run_dir = generate(config, config_path, blocks, run_id=args.run_id, selected_conditions=args.conditions, force=args.force)
+    elif args.stage in ("metrics", "analyze"):
+        # Reject metrics/analysis for an existing run created by a different
+        # noise implementation, even when no generation is requested.
+        ensure_immutable_run(run_dir, config, force=args.force)
     if args.stage in ("metrics", "all"): evaluate_run(run_dir, config, force=args.force)
     if args.stage in ("analyze", "all"): analyze_run(run_dir, config)
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from noise_methods import (construct_noise, independent_white, load_or_create_noise_batch, pink,
-                           sample_noise_batch, same_phase_floor)
+                           radial_frequency_grid, sample_noise_batch, same_phase_floor)
 
 
 class NoiseMethodTests(unittest.TestCase):
@@ -44,9 +44,15 @@ class NoiseMethodTests(unittest.TestCase):
         self.assertEqual(tuple(raw.shape), self.shape)
         self.assertTrue(torch.isfinite(raw).all())
 
+    def test_integer_frequency_grid_matches_divgen_filter_strength(self):
+        radial = radial_frequency_grid(128, 128)
+        multiplier = (1 + radial).pow(-.5)
+        self.assertGreater(float(radial.max()), 90.0)
+        self.assertLess(float(multiplier.min()), .11)
+
     def test_independent_spatial_and_frequency_formula_agree(self):
         spatial = independent_white(self.batch.base_white, self.batch.independent_eta, .3, .4)
-        h = 1 / (1 + torch.sqrt(torch.fft.fftfreq(32).view(32, 1).square() + torch.fft.rfftfreq(40).view(1, 21).square())).pow(.3)
+        h = (1 + radial_frequency_grid(32, 40)).pow(-.3)
         frequency = torch.fft.irfft2((1 - .4) ** .5 * torch.fft.rfft2(self.batch.base_white, dim=(-2, -1)) * h + .4 ** .5 * torch.fft.rfft2(self.batch.independent_eta, dim=(-2, -1)), s=(32, 40), dim=(-2, -1))
         self.assertTrue(torch.allclose(spatial, frequency, atol=2e-5))
 

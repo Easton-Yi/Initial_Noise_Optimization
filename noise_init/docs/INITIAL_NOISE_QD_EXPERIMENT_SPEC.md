@@ -118,7 +118,7 @@ $$
 
 This convention must be documented clearly: $\alpha$ is the **amplitude-spectrum exponent**, so the expected PSD is proportional to $(1+r)^{-2\alpha}$.
 
-Use `torch.fft.rfft2`/`irfft2` over the two spatial dimensions. Build the radial grid from `torch.fft.fftfreq` and `torch.fft.rfftfreq` in the same frequency units for every method. The `1+r` term keeps the DC gain finite.
+Use `torch.fft.rfft2`/`irfft2` over the two spatial dimensions. Build the radial grid in DivGen-compatible integer FFT-bin index units: `torch.fft.fftfreq(height) * height` and `torch.fft.rfftfreq(width) * width`. Use exactly these units for every method. The `1+r` term keeps the DC gain finite.
 
 ### 4.2 Baseline conditions
 

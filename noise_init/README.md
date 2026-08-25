@@ -6,6 +6,8 @@ The implementation was informed by the 2D `rfft2` pink-noise convention and veri
 
 `alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default.
 
+The radial frequency grid uses DivGen-compatible integer FFT-bin coordinates (`fftfreq(H) * H`, `rfftfreq(W) * W`), not normalized cycles per pixel. Runs made with the earlier normalized-frequency implementation are invalid for this experiment; the grid version is recorded in every new run manifest and blocks metrics/analysis on mismatched prior runs.
+
 ## Setup
 
 Run from `Initial_Noise_Optimization/noise_init` using `requirements.txt`. FLUX is gated in many environments, so export a Hugging Face token before the first model download. HPSv3 may need its own official metric-stage environment because its published Transformer pin can differ from the Diffusers generation environment; generation artefacts remain immutable and can be scored there later.
