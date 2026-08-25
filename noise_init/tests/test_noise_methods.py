@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from noise_methods import (construct_noise, independent_white, load_or_create_noise_batch, pink,
+from noise_methods import (construct_noise, independent_white, load_or_create_noise_batch, normalize, pink,
                            radial_frequency_grid, sample_noise_batch, same_phase_floor)
 
 
@@ -33,6 +33,14 @@ class NoiseMethodTests(unittest.TestCase):
         self.assertTrue(torch.allclose(construct_noise(self.batch, "same_phase", .5, 1., profile), white_norm, atol=2e-6))
         eta_norm = construct_noise(type(self.batch)(self.batch.independent_eta, self.batch.independent_eta, self.batch.eta_sample_seeds, self.batch.eta_sample_seeds, self.batch.eta_hashes, self.batch.eta_hashes), "baseline", 0., None, profile)
         self.assertTrue(torch.allclose(construct_noise(self.batch, "independent_white", .5, 1., profile), eta_norm, atol=2e-6))
+
+    def test_primary_and_divgen_compat_normalization_are_separate(self):
+        primary = normalize(self.batch.base_white, "per_sample_per_channel_zero_mean_unit_std")
+        compat = normalize(self.batch.base_white, "divgen_compat")
+        primary_flat, compat_flat = primary.reshape(4, 3, -1), compat.reshape(4, 3, -1)
+        self.assertTrue(torch.allclose(primary_flat.std(dim=-1, unbiased=False), torch.ones((4, 3)), atol=2e-6))
+        self.assertTrue(torch.allclose(compat_flat.std(dim=-1, unbiased=True), torch.ones((4, 3)), atol=2e-6))
+        self.assertFalse(torch.equal(primary, compat))
 
     def test_phase_and_frequency_domain_properties(self):
         raw = same_phase_floor(self.batch.base_white, .5, .35)

@@ -213,6 +213,8 @@ This removes mean/variance as uncontrolled differences and makes same-phase endp
 
 If strict compatibility with an existing DivGen implementation is required, support an explicitly named `divgen_compat` profile rather than silently changing behavior. Never combine results from different normalization profiles on one curve.
 
+The primary `per_sample_per_channel_zero_mean_unit_std` profile uses population standard deviation (`unbiased=False`). The explicitly named `divgen_compat` profile uses PyTorch's default sample standard deviation (`unbiased=True`) to match DivGen and the white/pink notebook. These profiles are separate experimental factors and must never be mixed in a formal curve.
+
 Record pre-normalization and post-normalization mean, standard deviation, L2 norm, and empirical radial PSD summary for every noise tensor.
 
 ## 5. Method parameter grids

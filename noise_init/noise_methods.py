@@ -64,25 +64,34 @@ def sample_noise_batch(master_seed: int, block_id: str, shape: tuple[int, int, i
 def normalize(latents: torch.Tensor, profile: str, eps: float = EPSILON) -> torch.Tensor:
     if profile == "none":
         return latents
-    if profile != "per_sample_per_channel_zero_mean_unit_std":
-        if profile == "divgen_compat":
-            profile = "per_sample_per_channel_zero_mean_unit_std"
-        else:
-            raise ValueError(f"Unknown normalization profile: {profile}")
+    if profile == "per_sample_per_channel_zero_mean_unit_std":
+        unbiased = False
+    elif profile == "divgen_compat":
+        # Matches DivGen and the white-vs-pink notebook's ``flat.std()``.
+        unbiased = True
+    else:
+        raise ValueError(f"Unknown normalization profile: {profile}")
     flat = latents.reshape(latents.shape[0], latents.shape[1], -1)
-    # unbiased=False makes a mathematically exact, documented population standard deviation.
-    return ((flat - flat.mean(dim=-1, keepdim=True)) / (flat.std(dim=-1, keepdim=True, unbiased=False) + eps)).reshape_as(latents)
+    return ((flat - flat.mean(dim=-1, keepdim=True)) / (flat.std(dim=-1, keepdim=True, unbiased=unbiased) + eps)).reshape_as(latents)
 
 
 def pink(base_white: torch.Tensor, alpha: float) -> torch.Tensor:
     if base_white.ndim != 4:
         raise ValueError("Noise must have shape (batch, channels, height, width)")
+    # The white endpoint must be an exact reference to the saved base tensor,
+    # not an approximately identity FFT/IFFT round trip.
+    if alpha == 0.0:
+        return base_white.clone()
     multiplier = pink_filter(base_white.shape[-2], base_white.shape[-1], alpha, device=base_white.device)
     return torch.fft.irfft2(torch.fft.rfft2(base_white, dim=(-2, -1)) * multiplier, s=base_white.shape[-2:], dim=(-2, -1))
 
 
 def same_phase_floor(base_white: torch.Tensor, alpha: float, gamma: float) -> torch.Tensor:
     _validate_gamma(gamma)
+    # Both identities are exact at the raw-noise level for every alpha/gamma
+    # value listed here; preserve them before any FFT numerical round trip.
+    if alpha == 0.0 or gamma == 1.0:
+        return base_white.clone()
     h = pink_filter(base_white.shape[-2], base_white.shape[-1], alpha, device=base_white.device)
     multiplier = torch.sqrt((1.0 - gamma) * h.square() + gamma)
     return torch.fft.irfft2(torch.fft.rfft2(base_white, dim=(-2, -1)) * multiplier, s=base_white.shape[-2:], dim=(-2, -1))
@@ -92,6 +101,10 @@ def independent_white(base_white: torch.Tensor, eta: torch.Tensor, alpha: float,
     _validate_gamma(gamma)
     if base_white.shape != eta.shape:
         raise ValueError("epsilon and eta must have the same shape")
+    if gamma == 0.0:
+        return pink(base_white, alpha)
+    if gamma == 1.0:
+        return eta.clone()
     return (1.0 - gamma) ** 0.5 * pink(base_white, alpha) + gamma ** 0.5 * eta
 
 

@@ -8,6 +8,8 @@ The implementation was informed by the 2D `rfft2` pink-noise convention and veri
 
 The radial frequency grid uses DivGen-compatible integer FFT-bin coordinates (`fftfreq(H) * H`, `rfftfreq(W) * W`), not normalized cycles per pixel. Runs made with the earlier normalized-frequency implementation are invalid for this experiment; the grid version is recorded in every new run manifest and blocks metrics/analysis on mismatched prior runs.
 
+The formal normalization profile uses population standard deviation (`unbiased=False`) uniformly for every condition. `divgen_compat` is available only as a separately named compatibility profile, using DivGen/Notebook sample standard deviation (`unbiased=True`); never mix it with the formal profile on one curve. White endpoints bypass FFT/IFFT so `alpha=0` and same-phase `gamma=1` are exact saved-white references before shared normalization.
+
 ## Setup
 
 Run from `Initial_Noise_Optimization/noise_init` using `requirements.txt`. FLUX is gated in many environments, so export a Hugging Face token before the first model download. HPSv3 may need its own official metric-stage environment because its published Transformer pin can differ from the Diffusers generation environment; generation artefacts remain immutable and can be scored there later.
