@@ -39,9 +39,15 @@ class Condition:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).open(encoding="utf-8") as handle:
+    path = Path(path).resolve()
+    with path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     if not isinstance(config, dict): raise ValueError("YAML root must be a mapping")
+    # Paths in checked-in YAML are relative to the independent noise_init root,
+    # not to the caller's shell directory or an adjacent DivGen checkout.
+    cache_dir = config.get("model", {}).get("cache_dir")
+    if cache_dir and not Path(cache_dir).is_absolute():
+        config["model"]["cache_dir"] = str((path.parent.parent / cache_dir).resolve())
     return config
 
 

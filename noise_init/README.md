@@ -1,8 +1,8 @@
 # Initial-noise quality–diversity experiment
 
-This directory implements the experiment in `docs/INITIAL_NOISE_QD_EXPERIMENT_SPEC.md` without changing the adjacent `divgen/` repository.
+This directory is a standalone implementation of the experiment in `docs/INITIAL_NOISE_QD_EXPERIMENT_SPEC.md`; it does not import code, models, or configuration from another checkout.
 
-Audit/reuse map: `divgen/training/noise_utils.py` supplied the existing 2D `rfft2` pink-noise convention and channelwise normalization; `divgen/models/RewardFlux2Klein.py` confirmed that FLUX.2 receives 4D spatial noise and packs it internally; its SDXL loader supplied the VAE/scheduler choices. The implementation here adds immutable block/noise provenance, matched white-floor methods, standalone evaluation, and block-level Q–D analysis.
+The implementation was informed by the 2D `rfft2` pink-noise convention and verified FLUX.2 latent-packing behavior in the prior DivGen work, but implements these locally. It adds immutable block/noise provenance, matched white-floor methods, standalone evaluation, and block-level Q–D analysis. Model weights are cached locally in `noise_init/cache/` by default.
 
 `alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default.
 

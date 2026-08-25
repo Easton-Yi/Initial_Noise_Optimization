@@ -12,7 +12,7 @@ model:
   dtype: bfloat16
   device: cuda
   cpu_offload: false
-  cache_dir: ../../divgen/cache
+  cache_dir: cache
 generation:
   height: 1024
   width: 1024
