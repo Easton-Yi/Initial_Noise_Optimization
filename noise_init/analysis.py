@@ -60,23 +60,31 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                 q = np.array([values[(block, condition)][quality] for block in sorted(blocks)])
                 d = np.array([values[(block, condition)][diversity] for block in sorted(blocks)])
                 q_interval, d_interval = _bootstrap(q, config["analysis"]), _bootstrap(d, config["analysis"])
-                aggregates.append({"condition_id": condition, "quality_metric": quality, "diversity_metric": diversity, "quality": q.mean(), "diversity": d.mean(), "block_count": len(blocks), "quality_se": q_interval["standard_error"], "diversity_se": d_interval["standard_error"], "quality_ci_low": q_interval["ci_low"], "quality_ci_high": q_interval["ci_high"], "diversity_ci_low": d_interval["ci_low"], "diversity_ci_high": d_interval["ci_high"], **_condition_metadata(metadata[(next(iter(blocks)), condition)])})
+                condition_meta = _condition_metadata(metadata[(next(iter(blocks)), condition)])
+                aggregates.append({"condition_id": condition, "quality_metric": quality, "diversity_metric": diversity, "quality": q.mean(), "diversity": d.mean(), "block_count": len(blocks), "quality_se": q_interval["standard_error"], "diversity_se": d_interval["standard_error"], "quality_ci_low": q_interval["ci_low"], "quality_ci_high": q_interval["ci_high"], "diversity_ci_low": d_interval["ci_low"], "diversity_ci_high": d_interval["ci_high"], **condition_meta, "curve_id": _curve_id(condition_meta)})
             curve_rows = [row for row in aggregates if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
-            for family in ("baseline", "same_phase", "independent_white"):
-                front = pareto_frontier([row for row in curve_rows if row["family"] == family])
-                frontier_rows.extend([{**row, "family": family} for row in front])
-            baseline = pareto_frontier([row for row in curve_rows if row["family"] == "baseline"])
-            for family in ("same_phase", "independent_white"):
-                ours = pareto_frontier([row for row in curve_rows if row["family"] == family])
+            for curve_id in sorted({row["curve_id"] for row in curve_rows}):
+                frontier_rows.extend(pareto_frontier([row for row in curve_rows if row["curve_id"] == curve_id]))
+            baseline = pareto_frontier([row for row in curve_rows if row["curve_id"] == "baseline"])
+            for curve_id in sorted({row["curve_id"] for row in curve_rows if row["curve_id"] != "baseline"}):
+                ours = pareto_frontier([row for row in curve_rows if row["curve_id"] == curve_id])
+                example = ours[0] if ours else {"family": "unknown", "gamma": ""}
                 if len(baseline) < 2 or len(ours) < 2: continue
                 lo, hi = max(baseline[0]["diversity"], ours[0]["diversity"]), min(baseline[-1]["diversity"], ours[-1]["diversity"])
                 if lo > hi:
-                    improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "family": family, "available": False, "reason": "no_shared_diversity_range"})
+                    improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": False, "reason": "no_shared_diversity_range"})
                     continue
-                for target in np.linspace(lo, hi, 25):
+                targets = [float(value) for value in np.linspace(lo, hi, 25)]
+                uncertainties = _bootstrap_matched_improvements(
+                    values,
+                    [row["condition_id"] for row in curve_rows if row["curve_id"] == "baseline"],
+                    [row["condition_id"] for row in curve_rows if row["curve_id"] == curve_id],
+                    quality, diversity, targets, config["analysis"],
+                )
+                for target, uncertainty in zip(targets, uncertainties):
                     q_base, q_ours = interpolate_within(baseline, float(target)), interpolate_within(ours, float(target))
                     if q_base is not None and q_ours is not None:
-                        improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "family": family, "available": True, "target_diversity": target, "quality_improvement": q_ours - q_base})
+                        improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": True, "target_diversity": target, "quality_improvement": q_ours - q_base, **uncertainty})
     # Paired effects use only block intersections, never individual images/pairs.
     for condition in conditions:
         family = _condition_metadata(metadata[(next(block for block, candidate in values if candidate == condition), condition)])["family"]
@@ -104,6 +112,13 @@ def _condition_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {"family": family, "method": row["method"], "alpha": row["alpha"], "gamma": row.get("gamma", "")}
 
 
+def _curve_id(metadata: dict[str, Any]) -> str:
+    """Baseline is one alpha sweep; every proposed fixed gamma is another sweep."""
+    if metadata["family"] == "baseline":
+        return "baseline"
+    return f"{metadata['family']}_gamma_{float(metadata['gamma']):.1f}"
+
+
 def _anchor_condition(condition: str) -> str:
     # same_phase/alpha_0p5_gamma_0p3 -> baseline/alpha_0p5
     alpha = condition.split("_gamma_", 1)[0].split("/", 1)[1]
@@ -117,13 +132,48 @@ def _bootstrap(values: np.ndarray, config: dict[str, Any]) -> dict[str, Any]:
     return {"point_estimate": float(values.mean()), "standard_error": float(means.std(ddof=1)), "ci_low": float(np.quantile(means, alpha)), "ci_high": float(np.quantile(means, 1 - alpha)), "block_count": len(values)}
 
 
+def _bootstrap_matched_improvements(values: dict[tuple[str, str], dict[str, float]], baseline_conditions: list[str], ours_conditions: list[str], quality: str, diversity: str, targets: list[float], config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Paired cluster bootstrap that recomputes curves/frontiers inside every draw."""
+    baseline_conditions, ours_conditions = sorted(set(baseline_conditions)), sorted(set(ours_conditions))
+    required = baseline_conditions + ours_conditions
+    blocks = sorted({block for block, _ in values if all((block, condition) in values and quality in values[(block, condition)] and diversity in values[(block, condition)] for condition in required)})
+    if not blocks:
+        return [{"bootstrap_replicates": 0, "bootstrap_standard_error": "", "bootstrap_ci_low": "", "bootstrap_ci_high": ""} for _ in targets]
+    rng = np.random.default_rng(int(config["bootstrap_seed"]))
+    differences = [[] for _ in targets]
+    for _ in range(int(config["bootstrap_replicates"])):
+        sampled = [blocks[index] for index in rng.integers(0, len(blocks), len(blocks))]
+        baseline = _bootstrap_curve(values, baseline_conditions, sampled, quality, diversity)
+        ours = _bootstrap_curve(values, ours_conditions, sampled, quality, diversity)
+        for index, target in enumerate(targets):
+            base_value, ours_value = interpolate_within(baseline, target), interpolate_within(ours, target)
+            if base_value is not None and ours_value is not None:
+                differences[index].append(ours_value - base_value)
+    alpha = (1 - float(config["confidence_level"])) / 2
+    results = []
+    for difference in differences:
+        if not difference:
+            results.append({"bootstrap_replicates": 0, "bootstrap_standard_error": "", "bootstrap_ci_low": "", "bootstrap_ci_high": ""})
+            continue
+        samples = np.asarray(difference)
+        results.append({"bootstrap_replicates": len(samples), "bootstrap_standard_error": float(samples.std(ddof=1)) if len(samples) > 1 else 0.0,
+                        "bootstrap_ci_low": float(np.quantile(samples, alpha)), "bootstrap_ci_high": float(np.quantile(samples, 1 - alpha))})
+    return results
+
+
+def _bootstrap_curve(values: dict[tuple[str, str], dict[str, float]], conditions: list[str], sampled_blocks: list[str], quality: str, diversity: str) -> list[dict[str, float]]:
+    return pareto_frontier([{"condition_id": condition, "quality": float(np.mean([values[(block, condition)][quality] for block in sampled_blocks])),
+                             "diversity": float(np.mean([values[(block, condition)][diversity] for block in sampled_blocks]))}
+                            for condition in conditions])
+
+
 def _se(values: np.ndarray) -> float:
     return float(values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
 
 
 def _plots(plot_dir: Path, rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
     import matplotlib.pyplot as plt
-    # Quality/alpha and diversity/alpha (or gamma) views.  ``rows`` contains a
+    # Quality/alpha and diversity/alpha views. ``rows`` contains a
     # quality value once per diversity pairing, so deduplicate by condition.
     for metric, value_key, error_key, directory in [
         ("clip_cosine", "quality", "quality_se", "baseline"), ("hpsv3", "quality", "quality_se", "baseline"),
@@ -132,18 +182,17 @@ def _plots(plot_dir: Path, rows: list[dict[str, Any]], config: dict[str, Any]) -
     ]:
         relevant = [row for row in rows if (row["quality_metric"] == metric if value_key == "quality" else row["diversity_metric"] == metric)]
         unique = {row["condition_id"]: row for row in relevant}.values()
-        for family in ("baseline", "same_phase", "independent_white"):
-            series = [row for row in unique if row["family"] == family]
+        for curve_id in sorted({row["curve_id"] for row in unique}):
+            series = [row for row in unique if row["curve_id"] == curve_id]
             if not series: continue
-            parameter = "alpha" if family == "baseline" else "gamma"
-            series = sorted(series, key=lambda row: float(row[parameter]))
+            series = sorted(series, key=lambda row: float(row["alpha"]))
             fig, axis = plt.subplots(figsize=(6, 4))
-            axis.errorbar([float(row[parameter]) for row in series], [float(row[value_key]) for row in series],
+            axis.errorbar([float(row["alpha"]) for row in series], [float(row[value_key]) for row in series],
                           yerr=[[float(row[f"{value_key}_ci_low"]) - float(row[value_key]) for row in series],
                                 [float(row[f"{value_key}_ci_high"]) - float(row[value_key]) for row in series]], marker="o", capsize=3)
-            axis.set(xlabel=parameter, ylabel=metric, title=f"{metric} vs {parameter} ({family})")
+            axis.set(xlabel="alpha", ylabel=metric, title=f"{metric} vs alpha ({curve_id})")
             axis.grid(alpha=.2)
-            target = plot_dir / ("baseline" if family == "baseline" else "methods") / f"{family}__{metric}__{parameter}"
+            target = plot_dir / ("baseline" if curve_id == "baseline" else "methods") / f"{curve_id}__{metric}__alpha"
             target.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
     for quality in ("clip_cosine", "hpsv3"):
@@ -151,10 +200,12 @@ def _plots(plot_dir: Path, rows: list[dict[str, Any]], config: dict[str, Any]) -
             current = [row for row in rows if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
             if not current: continue
             fig, axis = plt.subplots(figsize=(6, 4))
-            for family in sorted({row["family"] for row in current}):
-                series = sorted([row for row in current if row["family"] == family], key=lambda row: row["diversity"])
-                axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=family)
-                for row in series: axis.annotate(str(row["alpha"] if family == "baseline" else row["gamma"]), (row["diversity"], row["quality"]), fontsize=7)
+            for curve_id in sorted({row["curve_id"] for row in current}):
+                series = sorted([row for row in current if row["curve_id"] == curve_id], key=lambda row: float(row["alpha"]))
+                raw_line, = axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=curve_id)
+                frontier = pareto_frontier(series)
+                axis.plot([row["diversity"] for row in frontier], [row["quality"] for row in frontier], linestyle="--", marker="x", color=raw_line.get_color(), label=f"{curve_id} Pareto")
+                for row in series: axis.annotate(f"α={row['alpha']}", (row["diversity"], row["quality"]), fontsize=7)
             axis.set(xlabel=diversity, ylabel=quality, title=f"Q-D ({quality} / {diversity})")
             axis.legend(); axis.grid(alpha=.2)
             target = plot_dir / "qd" / f"{quality}__{diversity}"; target.parent.mkdir(parents=True, exist_ok=True)

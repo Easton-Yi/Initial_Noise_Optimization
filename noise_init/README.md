@@ -45,41 +45,43 @@ python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --ru
 python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_pilot
 ```
 
-The baseline outputs are under `outputs/flux2_baseline_pilot/`. Inspect the aggregate curves to select an anchor alpha using the aggregate failure/trade-off region—not one prompt.
+The baseline outputs are under `outputs/flux2_baseline_pilot/`. This validates the baseline and can reveal the trade-off region, but the formal proposed-method grid is a full alpha sweep, not an anchor-alpha sweep.
 
 ## 3. Formal FLUX.2 comparison: baseline + both proposed initial-noise methods
 
 The final comparison must live in **one fresh run directory**, so all methods have the same immutable manifest, normalization, model/sampler settings, prompt blocks, and metric versions. Do not append proposed methods to `flux2_baseline_pilot`: the run manifest intentionally prevents changing a configuration after generation.
 
-After choosing the aggregate anchor alpha from the pilot, make a copy of the baseline config and freeze it, for example:
+Make a copy of the baseline config and freeze the full proposed-method grid, for example:
 
 ```bash
-cp configs/flux2_klein.yaml configs/flux2_klein_full_alpha_0p5.yaml
+cp configs/flux2_klein.yaml configs/flux2_klein_full.yaml
 ```
 
-Edit the copied YAML as follows (replace `0.5` with the approved aggregate anchor if different, and give `experiment.name` a new final-run name):
+Set a new `experiment.name` and enable both methods using the complete baseline alpha grid crossed with the nine non-degenerate intermediate gamma values:
 
 ```yaml
 same_phase_floor:
   enabled: true
-  alpha_values: [0.5]
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 independent_white:
   enabled: true
-  alpha_values: [0.5]
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 ```
 
-Then run the **entire** final grid—eight baselines, eleven same-phase conditions, and eleven independent-white conditions—over the frozen formal block manifest:
+Then run the **entire** final grid—one shared eight-point baseline curve, nine same-phase alpha-sweep curves, and nine independent-white alpha-sweep curves—over the frozen formal block manifest:
 
 ```bash
-python3 run_experiment.py --config configs/flux2_klein_full_alpha_0p5.yaml --stage generate --run-id flux2_full_alpha_0p5
-python3 run_experiment.py --config configs/flux2_klein_full_alpha_0p5.yaml --stage metrics --run-id flux2_full_alpha_0p5
-python3 run_experiment.py --config configs/flux2_klein_full_alpha_0p5.yaml --stage analyze --run-id flux2_full_alpha_0p5
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full
 ```
 
-This produces raw condition records, per-image/pair/group metric tables, baseline and method curves, Pareto frontiers, and matched-diversity comparisons under `outputs/flux2_full_alpha_0p5/`. Do not use `--conditions` for this formal run: it is only for controlled smoke subsets.
+This produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. `gamma=0` is represented by the shared baseline curve; `gamma=1` is a degenerate endpoint and is tested only at tensor level. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries. The analysis writes per-method, per-gamma Pareto and matched-diversity comparisons under `outputs/flux2_full/`.
+
+Do not use `--conditions` for this formal run: it is only for controlled smoke subsets.
 
 `--force` can recreate derived metric outputs but cannot replace a cached source-noise batch, generated PNG, or immutable run configuration. Use a new `--run-id` for a deliberately new experiment.
 

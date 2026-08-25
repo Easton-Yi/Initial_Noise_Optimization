@@ -219,7 +219,7 @@ Record pre-normalization and post-normalization mean, standard deviation, L2 nor
 
 The configuration must support arbitrary lists rather than hard-coded values.
 
-Recommended pilot:
+Primary formal grid:
 
 ```yaml
 baseline:
@@ -227,16 +227,33 @@ baseline:
 
 same_phase_floor:
   enabled: false        # enable after baseline validation
-  alpha_values: [0.5]  # replace/add anchors based on baseline failure region
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 independent_white:
   enabled: false
-  alpha_values: [0.5]
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 ```
 
-Do not choose the final anchor alpha after looking only at one cherry-picked prompt. Select it from the aggregate baseline failure/trade-off region using a documented rule, then freeze the configuration before running the proposed methods.
+The formal proposed-method experiment is the full alpha sweep crossed with the nine non-degenerate intermediate values $\gamma\in\{0.1,\ldots,0.9\}$. For each fixed gamma, sweep the same complete alpha grid as the baseline; this produces one directly comparable Q–D curve per gamma. A one-alpha gamma sweep may be used only as a smoke test and is not the final experiment. The formula endpoints $\gamma=0$ and $\gamma=1$ remain mandatory tensor-level tests but are not formal generation conditions.
+
+Do not materialize the rectangular grid naively at the gamma endpoints. The formal Q–D comparison contains only the baseline alpha sweep and the intermediate-gamma alpha sweeps:
+
+- `gamma=0` is exactly the eight-point baseline alpha sweep for both methods, so it is represented by the single baseline curve and is not generated or plotted again;
+- for each method, `gamma=0.1,...,0.9` contributes nine new alpha-sweep curves, or $9\times8=72$ logical curve entries before exact aliasing;
+- for same-phase, the `alpha=0` member of every intermediate-gamma curve is also exactly the cached baseline-white gallery, so these nine logical curve entries add no generation;
+- `same_phase, gamma=1` collapses to the cached baseline-white point and is not run as a formal condition;
+- `independent_white, gamma=1` collapses to the white-noise distribution. With the method's independent cached $\eta$, its finite-sample Q–D value need not exactly equal the baseline-white value, but it is not an alpha-sweep curve and is omitted from the formal comparison.
+
+Therefore, the primary plot contains 19 curves in total: one shared baseline curve, nine same-phase curves for `gamma=0.1,...,0.9`, and nine independent-white curves for `gamma=0.1,...,0.9`. These curves contain $8+72+72=152$ logical curve entries. After exact aliasing, only $8+(9\times7)+(9\times8)=143$ unique four-image galleries are required per prompt–seed block: eight baseline galleries, 63 new same-phase galleries, and 72 new independent-white galleries. Preserve all alias/provenance records so each same-phase curve can reference the shared baseline-white endpoint. Keep formula endpoint identities in the method documentation and tensor-level tests, but do not generate or plot formal `gamma=0` or `gamma=1` method conditions.
+
+Endpoint interpretation:
+
+- `gamma=0`: both proposed methods reproduce the complete baseline alpha sweep and therefore add no new curve;
+- `gamma=1`: same-phase becomes the same base-white tensor for every alpha, so it collapses exactly to the baseline white point;
+- `gamma=1`: independent-white becomes the same cached independent-white tensor for every alpha, so it collapses to one point from the same white-noise distribution; finite-sample metrics may place it near rather than exactly on the baseline white point;
+- intermediate gamma values produce the scientifically relevant compensated alpha-sweep curves.
 
 ## 6. Model adapter contract
 
@@ -368,13 +385,13 @@ baseline:
 
 same_phase_floor:
   enabled: false
-  alpha_values: [0.5]
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 independent_white:
   enabled: false
-  alpha_values: [0.5]
-  gamma_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+  gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 quality_metrics:
   clip:
@@ -465,8 +482,8 @@ outputs/<run_id>/
         samples.jsonl
       baseline/alpha_0p1/
       ...
-      same_phase/alpha_0p5_gamma_0p1/
-      independent_white/alpha_0p5_gamma_0p1/
+      same_phase/alpha_0p1_gamma_0p1/
+      independent_white/alpha_0p1_gamma_0p1/
   metrics/
     per_image.csv
     per_pair.csv
@@ -596,7 +613,7 @@ $$
 \Delta D_{b,\alpha}=D_{b,\alpha}-D_{b,\mathrm{white}}.
 $$
 
-For each proposed condition relative to its matched simple-pink anchor, calculate the analogous paired differences. Store them in `paired_effects.csv`.
+For each proposed condition relative to the simple-pink baseline at the same alpha, calculate the analogous paired differences. Store them in `paired_effects.csv`.
 
 ## 13. Required plots
 
@@ -618,30 +635,35 @@ For every quality/diversity pair:
 
 ### 13.2 Proposed methods
 
-For each fixed anchor alpha:
+For each fixed gamma and for each proposed method:
 
-- quality versus gamma;
-- diversity versus gamma;
-- Q–D curves for baseline, same-phase floor, and independent-white replenishment;
-- visually distinguish raw condition paths from Pareto frontiers;
-- label endpoints and intermediate gamma values.
+- quality versus alpha;
+- diversity versus alpha;
+- one Q–D curve whose points sweep alpha from `0.0` to `0.7`;
+- overlay the baseline alpha-sweep curve for direct comparison;
+- visually distinguish gamma curves and raw condition paths from Pareto frontiers;
+- label alpha values on points and gamma values in legends.
+
+Also provide optional fixed-alpha cross-sections versus gamma for diagnosis, but do not use those cross-sections as the primary Q–D comparison.
 
 ### 13.3 Same-diversity comparison
 
 Raw parameter sweeps may be non-monotonic. Therefore:
 
 1. retain and plot every raw condition point;
-2. determine the empirical non-dominated/Pareto frontier separately;
-3. sort frontier points by diversity;
-4. use piecewise-linear interpolation only within the diversity range shared by baseline and the proposed method;
-5. prohibit extrapolation;
-6. calculate:
+2. treat each fixed-gamma alpha sweep as one proposed-method Q–D curve, never as a fixed-alpha gamma sweep;
+3. compare each fixed-gamma curve separately with the baseline curve over their observed common diversity range;
+4. determine the empirical non-dominated/Pareto frontier of each curve separately;
+5. sort frontier points by diversity;
+6. use piecewise-linear interpolation only within the diversity range shared by baseline and that fixed-gamma curve;
+7. prohibit extrapolation;
+8. calculate for method $m$ and fixed gamma:
 
 $$
-\Delta Q(D^*)=Q_{\mathrm{ours}}(D^*)-Q_{\mathrm{baseline}}(D^*).
+\Delta Q_{m,\gamma}(D^*)=Q_{m,\gamma}(D^*)-Q_{\mathrm{baseline}}(D^*).
 $$
 
-If the curves have no adequate overlapping diversity interval, report that the matched-diversity comparison is unavailable rather than forcing a claim.
+An optional overall method envelope may be computed from all `(alpha, gamma)` points, but label it explicitly as a cross-gamma hyperparameter envelope. Do not present that envelope as though it were one ordinary parameter-sweep curve. If a fixed-gamma curve has no adequate overlapping diversity interval with baseline, report that its matched-diversity comparison is unavailable rather than forcing a claim.
 
 ## 14. Validation and acceptance tests
 
@@ -757,11 +779,10 @@ Gate:
 
 Tasks:
 
-- freeze selected anchor alpha values from the baseline rule;
 - implement same-phase floor and endpoint/PSD tests;
-- run a one-block gamma smoke sweep;
-- run all approved blocks with generation settings unchanged;
-- evaluate metrics and add same-phase curves.
+- run a one-block reduced smoke sweep;
+- run the full alpha sweep for every configured intermediate gamma over all approved blocks with generation settings unchanged;
+- evaluate metrics and add one alpha-sweep Q–D curve per fixed gamma.
 
 Gate:
 
@@ -776,13 +797,13 @@ Tasks:
 - implement deterministic independent eta cache;
 - implement spatial combination and optional frequency-domain equivalence test;
 - run endpoint and expected-PSD tests;
-- run one-block smoke sweep, then the approved full manifest;
-- evaluate metrics and add independent-white curves.
+- run one-block reduced smoke sweep, then the full alpha sweep for every configured intermediate gamma over the approved manifest;
+- evaluate metrics and add one alpha-sweep Q–D curve per fixed gamma.
 
 Gate:
 
 - eta is independent of epsilon and fixed across gamma within a block;
-- gamma zero reuses/matches the pink anchor;
+- gamma zero reuses/matches the complete baseline alpha sweep;
 - finite-sample difference from same-phase is preserved and documented.
 
 ### Phase 6 — Final Q–D comparison
@@ -820,8 +841,8 @@ The implementation is complete when:
 4. all required raw and grouped metrics are stored with versions and hashes;
 5. baseline quality–alpha, diversity–alpha, and Q–D curves are reproducible;
 6. both proposed methods pass endpoint and PSD tests;
-7. proposed-method curves are produced using otherwise identical generation/evaluation settings;
-8. quality improvement at matched diversity is reported only over observed overlap with uncertainty;
+7. for each proposed method, every configured fixed gamma has a complete alpha-sweep Q–D curve produced under otherwise identical generation/evaluation settings;
+8. quality improvement at matched diversity is reported separately for each method and gamma, only over observed overlap and with uncertainty;
 9. all data, plots, and claims are traceable to immutable manifests and complete prompt–seed blocks.
 
 ## 17. Step-by-step prompts for a coding agent
@@ -834,6 +855,8 @@ Use this when the full `noise_init/` repository is available and the agent is au
 Read noise_init/docs/INITIAL_NOISE_QD_EXPERIMENT_SPEC.md completely and implement the specified experiment end to end, working only under noise_init/. Start by auditing and reusing the current white/pink generation code; do not create a parallel framework. Keep the implementation compact: one experiment entry point, one noise-method module, one model-adapter module, one metric module, one analysis module, and only the utilities/tests genuinely needed.
 
 Internally follow Phases 0–6 in order. At each phase, run the small acceptance tests before continuing, but continue automatically unless there is a real blocker or a choice that changes the scientific experiment. Implement baseline first, then all required metrics and baseline curves, then same-phase PSD floor, then independent-white replenishment, and finally the matched-diversity Q–D comparison. Apart from initial-noise construction, keep model, prompt, sampler, steps, guidance, resolution, normalization, and metric versions identical across methods.
+
+The formal proposed-method comparison is not an anchor-alpha experiment. Run the baseline alpha sweep once with alpha=[0.0,0.1,...,0.7]. For each proposed method, run the complete alpha sweep at each intermediate gamma=[0.1,0.2,...,0.9]. Do not generate proposed-method conditions at gamma=0 or gamma=1: gamma=0 is the existing baseline curve, while gamma=1 is a degenerate white endpoint rather than an alpha-sweep curve. Keep endpoint tensor tests. Plot nine Q–D curves per method, overlay each with the one shared baseline curve, and report matched-diversity improvement separately by method and gamma. A fixed-alpha gamma sweep is diagnostic only.
 
 Target a 24 GB CUDA server: use BF16, generate the four gallery samples sequentially or in a small batch, release the generation model before loading HPSv3, and use CPU offload only if the measured smoke test requires it. Make every expensive stage resumable. Before launching a large prompt grid, complete a one-prompt smoke run and report the command, output count, test results, and estimated storage/runtime. Do not silently substitute metrics, change normalization, extrapolate Q–D curves, or modify files outside noise_init/.
 ```
@@ -873,19 +896,19 @@ Implement Phase 3 only. Add versioned adapters for CLIP cosine and HPSv3 quality
 ### Prompt F — same-phase method
 
 ```text
-Implement Phase 4 only for the approved anchor alpha and gamma grid. Use the exact formula and shared normalization in the specification. Add gamma endpoint, phase-preservation, pairing, and expected-PSD tests. Reuse cached pink/white endpoints where applicable. Run a one-block smoke sweep before scaling. Then evaluate with the already frozen metrics and add same-phase plots without changing baseline records.
+Implement Phase 4 only for the complete alpha sweep at each configured intermediate gamma. Use the exact formula and shared normalization in the specification. Add gamma endpoint, phase-preservation, pairing, and expected-PSD tensor tests. Do not generate formal method conditions at gamma=0 or gamma=1. Run a reduced one-block smoke sweep before scaling. Then run every alpha for gamma=0.1,...,0.9, evaluate with the already frozen metrics, and produce nine alpha-sweep Q–D curves without changing baseline records.
 ```
 
 ### Prompt G — independent-white method
 
 ```text
-Implement Phase 5 only. Add deterministic independent eta batches, keep eta fixed across gamma within each prompt–seed block, implement the spatial combination equivalent to the specified Fourier formula, and add endpoint/independence/expected-PSD tests. Run a one-block smoke sweep before scaling, then evaluate with unchanged generation and metric settings and add independent-white plots.
+Implement Phase 5 only for the complete alpha sweep at each configured intermediate gamma. Add deterministic independent eta batches, keep eta fixed across gamma within each prompt–seed block, implement the spatial combination equivalent to the specified Fourier formula, and add endpoint/independence/expected-PSD tensor tests. Do not generate formal method conditions at gamma=0 or gamma=1. Run a reduced one-block smoke sweep before scaling. Then run every alpha for gamma=0.1,...,0.9, evaluate with unchanged generation and metric settings, and produce nine alpha-sweep Q–D curves without changing baseline records.
 ```
 
 ### Prompt H — final comparison
 
 ```text
-Implement Phase 6 only. From immutable per-group records, compute raw Q–D paths, empirical Pareto frontiers, common diversity ranges, and the quality improvement of each proposed method over baseline at matched diversity. Recompute the full comparison within paired cluster-bootstrap replicates, prohibit extrapolation, and output both figures and machine-readable tables. Audit that all compared methods use identical complete prompt–seed blocks, model settings, normalization, and metric versions. Summarize supported conclusions separately from limitations.
+Implement Phase 6 only. From immutable per-group records, treat each fixed-gamma alpha sweep as one proposed-method Q–D curve. For each method and gamma separately, compute raw Q–D paths, empirical Pareto frontiers, the common diversity range with baseline, and quality improvement over baseline at matched diversity. Optionally compute a clearly labeled cross-gamma hyperparameter envelope, but do not conflate it with an ordinary sweep curve. Recompute the full comparison within paired cluster-bootstrap replicates, prohibit extrapolation, and output both figures and machine-readable tables. Audit that all compared methods use identical complete prompt–seed blocks, model settings, normalization, and metric versions. Summarize supported conclusions separately from limitations.
 ```
 
 ## 18. Primary references

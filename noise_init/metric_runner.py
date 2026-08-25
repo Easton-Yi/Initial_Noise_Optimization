@@ -109,14 +109,24 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
     metric_hash = sha256_text(config.get("quality_metrics"), config.get("diversity_metrics"), runner.metric_versions())
     metrics_dir = run_dir / "metrics"
     existing = [] if force else _read_csv(metrics_dir / "per_image.csv")
-    valid = {(r["image_hash"], r["metric_config_hash"], r["metric"]): r for r in existing}
-    per_image: list[dict[str, Any]] = list(existing)
+    # A score cache is keyed by immutable metric input, while the persisted
+    # record is keyed by its experimental condition. Exact image aliases must
+    # therefore reuse the score *and* receive their own condition record.
+    score_cache = {(r["image_hash"], r["metric_config_hash"], r["metric"]): float(r["score"]) for r in existing}
+    current_input = {(row["block_id"], row["condition_id"], row["base_index"]) for row in rows}
+    per_image: list[dict[str, Any]] = [r for r in existing if (r["block_id"], r["condition_id"], int(r.get("base_index", -1))) in current_input and r.get("metric_config_hash") == metric_hash]
+    existing_records = {(r["block_id"], r["condition_id"], int(r.get("base_index", -1)), r["image_hash"], r["metric_config_hash"], r["metric"]) for r in per_image}
     for row in rows:
         path, digest = Path(row["image_path"]), file_hash(row["image_path"])
         for metric, enabled in (("clip_cosine", config["quality_metrics"]["clip"]["enabled"]), ("hpsv3", config["quality_metrics"]["hpsv3"]["enabled"])):
-            if not enabled or (digest, metric_hash, metric) in valid:
+            record_key = (row["block_id"], row["condition_id"], row["base_index"], digest, metric_hash, metric)
+            if not enabled or record_key in existing_records:
                 continue
-            score = runner.clip_cosine(path, row["prompt"]) if metric == "clip_cosine" else runner.hpsv3(path, row["prompt"])
+            cache_key = (digest, metric_hash, metric)
+            score = score_cache.get(cache_key)
+            if score is None:
+                score = runner.clip_cosine(path, row["prompt"]) if metric == "clip_cosine" else runner.hpsv3(path, row["prompt"])
+                score_cache[cache_key] = score
             per_image.append({**_common(row), "metric": metric, "score": score, "image_hash": digest, "metric_config_hash": metric_hash})
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -154,7 +164,7 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
 
 
 def _common(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: row[key] for key in ("run_id", "model_id", "block_id", "prompt_id", "prompt", "seed_batch_id", "condition_id", "method", "alpha", "gamma", "normalization_profile") if key in row}
+    return {key: row[key] for key in ("run_id", "model_id", "block_id", "prompt_id", "prompt", "seed_batch_id", "base_index", "condition_id", "method", "alpha", "gamma", "normalization_profile") if key in row}
 
 
 def _group_quality_rows(per_image: list[dict[str, Any]]) -> list[dict[str, Any]]:

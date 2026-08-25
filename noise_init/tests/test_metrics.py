@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import interpolate_within, pareto_frontier
+from analysis import _curve_id, interpolate_within, pareto_frontier
 from metric_runner import _group_quality_rows
 
 
@@ -26,6 +26,11 @@ class MetricContractTests(unittest.TestCase):
         self.assertIsNone(interpolate_within(front, .05))
         self.assertIsNone(interpolate_within(front, .4))
         self.assertIsNotNone(interpolate_within(front, .2))
+
+    def test_each_proposed_gamma_is_a_separate_curve(self):
+        self.assertEqual(_curve_id({"family": "baseline", "gamma": ""}), "baseline")
+        self.assertEqual(_curve_id({"family": "same_phase", "gamma": "0.1"}), "same_phase_gamma_0.1")
+        self.assertEqual(_curve_id({"family": "independent_white", "gamma": .9}), "independent_white_gamma_0.9")
 
 
 if __name__ == "__main__": unittest.main()

@@ -65,6 +65,8 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
             if float(alpha) < 0: raise ValueError(f"{name}: alpha must be non-negative")
         for gamma in section.get("gamma_values", []):
             if not 0 <= float(gamma) <= 1: raise ValueError(f"{name}: gamma must be in [0, 1]")
+        if name != "baseline" and section.get("enabled", False) and any(float(gamma) in (0.0, 1.0) for gamma in section.get("gamma_values", [])):
+            raise ValueError(f"{name}: gamma=0 and gamma=1 are tensor-test endpoints, not formal generation conditions")
     manifest = (config_path.parent.parent / config["blocks"]["manifest"]).resolve()
     blocks = read_jsonl(manifest)
     if not blocks: raise ValueError(f"Block manifest is empty: {manifest}")
@@ -88,7 +90,9 @@ def all_conditions(config: dict[str, Any], selected: str | None = None) -> list[
         elif token.startswith("pink:"): parsed.append(Condition("baseline", float(token.split(":", 1)[1]), None))
         elif token.startswith("same:") or token.startswith("independent:"):
             family, alpha, gamma = token.split(":")
-            parsed.append(Condition("same_phase" if family == "same" else "independent_white", float(alpha), float(gamma)))
+            gamma_value = float(gamma)
+            if gamma_value in (0.0, 1.0): raise ValueError("gamma=0 and gamma=1 are tensor-test endpoints, not generation conditions")
+            parsed.append(Condition("same_phase" if family == "same" else "independent_white", float(alpha), gamma_value))
         else: raise ValueError(f"Unknown --conditions token: {token}")
     return parsed
 
@@ -130,6 +134,9 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
             latents = construct_noise(batch, condition.family, condition.alpha, condition.gamma, config["experiment"]["normalization_profile"])
             sample_dir = _sample_path(run_dir, adapter.model_id, block["block_id"], condition)
             if _is_complete(sample_dir, latents) and not force: continue
+            if _is_same_phase_white_alias(condition):
+                _write_same_phase_white_alias(run_dir, adapter.model_id, block, condition, batch, latents, config)
+                continue
             # PNGs are source artefacts for all later metrics.  --force must not
             # replace them: use a new run id if a condition is incomplete/corrupt.
             if sample_dir.exists():
@@ -151,6 +158,34 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
             write_json(sample_dir / "noise_statistics.json", {"pre_normalization": noise_statistics(_raw_noise(batch, condition)), "post_normalization": noise_statistics(latents)})
     if config["generation"].get("release_model_after_generation", True): adapter.close()
     return run_dir
+
+
+def _is_same_phase_white_alias(condition: Condition) -> bool:
+    """The alpha=0 same-phase floor is exactly the normalized base-white gallery.
+
+    It remains a logical member of every fixed-gamma curve, but never requires a
+    duplicate model invocation or duplicate PNG.  Gamma endpoints are handled
+    by tensor tests and are intentionally absent from the formal YAML grids.
+    """
+    return condition.family == "same_phase" and condition.alpha == 0.0 and condition.gamma not in (None, 0.0, 1.0)
+
+
+def _write_same_phase_white_alias(run_dir: Path, model_id: str, block: dict[str, Any], condition: Condition, batch, latents: torch.Tensor, config: dict[str, Any]) -> None:
+    source_condition = Condition("baseline", 0.0, None)
+    source_dir = _sample_path(run_dir, model_id, block["block_id"], source_condition)
+    source_records = read_jsonl(source_dir / "samples.jsonl")
+    if not _is_complete(source_dir, latents):
+        raise RuntimeError(f"Same-phase white alias requires completed baseline white gallery: {source_dir}")
+    target_dir = _sample_path(run_dir, model_id, block["block_id"], condition)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    records = []
+    for source in source_records:
+        records.append({**source, "method": condition.method, "family": condition.family, "condition_id": condition.identifier,
+                        "alpha": condition.alpha, "gamma": condition.gamma, "final_noise_hash": tensor_hash(latents[source["base_index"]]),
+                        "alias_of_condition_id": source_condition.identifier, "alias_of_image_path": source["image_path"], "is_exact_alias": True})
+    write_jsonl(target_dir / "samples.jsonl", records)
+    write_json(target_dir / "noise_statistics.json", {"alias_of_condition_id": source_condition.identifier,
+               "pre_normalization": noise_statistics(_raw_noise(batch, condition)), "post_normalization": noise_statistics(latents)})
 
 
 def _raw_noise(batch, condition: Condition) -> torch.Tensor:

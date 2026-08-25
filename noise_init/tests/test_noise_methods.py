@@ -20,6 +20,10 @@ class NoiseMethodTests(unittest.TestCase):
         self.assertEqual(len(set(self.batch.base_hashes)), 4)
         self.assertNotEqual(self.batch.base_hashes, self.batch.eta_hashes)
 
+    def test_manifest_batch_seed_controls_the_four_base_samples(self):
+        batch = sample_noise_batch(20260825, "p000_s000", self.shape, batch_seed=10000)
+        self.assertEqual(batch.sample_seeds, [10000, 10001, 10002, 10003])
+
     def test_endpoints_after_shared_normalization(self):
         profile = "per_sample_per_channel_zero_mean_unit_std"
         pink_norm = construct_noise(self.batch, "baseline", .5, None, profile)
