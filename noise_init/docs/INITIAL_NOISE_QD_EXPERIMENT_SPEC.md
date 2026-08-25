@@ -15,7 +15,7 @@ This project studies whether changing only the initial latent-noise spectrum can
 The implementation must answer three questions in order:
 
 1. Baseline: how do white noise and simple pink noise with different exponents affect image quality and within-prompt diversity?
-2. Same-phase PSD floor: at a fixed pink exponent, can restoring spectral power—especially suppressed high-frequency power—recover quality while retaining pink-noise diversity?
+2. Same-phase PSD floor: across the full pink-exponent sweep, can restoring spectral power—especially suppressed high-frequency power—improve quality while retaining the diversity associated with pink-noise initialization?
 3. Independent-white replenishment: for the same expected PSD, does injecting independent Gaussian randomness behave differently from restoring amplitudes while retaining the base noise's Fourier phase?
 
 This specification covers direct generation from designed initial noise. It does **not** include DivGen/noise optimization in the first implementation. A fixed optimizer can be added later as a separate experimental factor without changing the data contract defined here.
@@ -246,7 +246,7 @@ Do not materialize the rectangular grid naively at the gamma endpoints. The form
 - `same_phase, gamma=1` collapses to the cached baseline-white point and is not run as a formal condition;
 - `independent_white, gamma=1` collapses to the white-noise distribution. With the method's independent cached $\eta$, its finite-sample Q–D value need not exactly equal the baseline-white value, but it is not an alpha-sweep curve and is omitted from the formal comparison.
 
-Therefore, the primary plot contains 19 curves in total: one shared baseline curve, nine same-phase curves for `gamma=0.1,...,0.9`, and nine independent-white curves for `gamma=0.1,...,0.9`. These curves contain $8+72+72=152$ logical curve entries. After exact aliasing, only $8+(9\times7)+(9\times8)=143$ unique four-image galleries are required per prompt–seed block: eight baseline galleries, 63 new same-phase galleries, and 72 new independent-white galleries. Preserve all alias/provenance records so each same-phase curve can reference the shared baseline-white endpoint. Keep formula endpoint identities in the method documentation and tensor-level tests, but do not generate or plot formal `gamma=0` or `gamma=1` method conditions.
+Therefore, for each quality–diversity metric pair, the primary comparison contains 19 curves in total: one shared baseline curve, nine same-phase curves for `gamma=0.1,...,0.9`, and nine independent-white curves for `gamma=0.1,...,0.9`. These curves contain $8+72+72=152$ logical curve entries. After exact aliasing, only $8+(9\times7)+(9\times8)=143$ unique four-image galleries are required per prompt–seed block: eight baseline galleries, 63 new same-phase galleries, and 72 new independent-white galleries. Preserve all alias/provenance records so each same-phase curve can reference the shared baseline-white endpoint. Keep formula endpoint identities in the method documentation and tensor-level tests, but do not generate or plot formal `gamma=0` or `gamma=1` method conditions.
 
 Endpoint interpretation:
 
@@ -643,6 +643,8 @@ For each fixed gamma and for each proposed method:
 - overlay the baseline alpha-sweep curve for direct comparison;
 - visually distinguish gamma curves and raw condition paths from Pareto frontiers;
 - label alpha values on points and gamma values in legends.
+
+Produce a baseline-plus-one-gamma figure for each `(method, gamma)` curve. An additional all-curve overview is useful for context, but it must not replace the per-gamma comparisons.
 
 Also provide optional fixed-alpha cross-sections versus gamma for diagnosis, but do not use those cross-sections as the primary Q–D comparison.
 

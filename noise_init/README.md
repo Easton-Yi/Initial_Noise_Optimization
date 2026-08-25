@@ -28,7 +28,7 @@ python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --ru
 
 Confirm that the smoke output contains the expected image/hash/provenance records before continuing. Do not run `analyze` for this deliberately incomplete two-condition smoke run.
 
-## 2. FLUX.2 Klein formal baseline: white through pink 0.7
+## 2. Optional FLUX.2 Klein baseline pilot: white through pink 0.7
 
 `configs/flux2_klein.yaml` selects the primary model, **FLUX.2 Klein 4B, BF16, 1024×1024, four inference steps**, and enables all eight matched baseline conditions:
 
@@ -36,7 +36,7 @@ Confirm that the smoke output contains the expected image/hash/provenance record
 white (= alpha 0.0), pink alpha = 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7
 ```
 
-The checked-in two-block `manifests/blocks.jsonl` is a pilot example. Replace or extend it with the approved prompt × seed-batch blocks before a formal run; every final block must be present before launch, with multiple `seed_batch_id` values per prompt where applicable.
+The checked-in two-block `manifests/blocks.jsonl` is a pilot example. Use this step only with a deliberately small pilot manifest to validate the baseline procedure and inspect basic behaviour.
 
 For an optional small baseline pilot, use the explicit pilot run ID:
 
@@ -46,20 +46,11 @@ python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --ru
 python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_pilot
 ```
 
-For the approved formal manifest, first validate and then use the separate formal ID:
-
-```bash
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage validate
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --run-id flux2_baseline_formal
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux2_baseline_formal
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_formal
-```
-
-Both commands run the complete white-to-pink-0.7 alpha sweep because they omit `--conditions`. The proposed-method experiment remains a full alpha sweep at every intermediate gamma, not an anchor-alpha sweep.
+These commands run the complete white-to-pink-0.7 alpha sweep because they omit `--conditions`. The proposed-method experiment is a full alpha sweep at every intermediate gamma, not an anchor-alpha sweep. Do not run this baseline-only configuration over the full formal manifest as a required pre-step: the full experiment below already generates its matched formal baseline once.
 
 ## 3. Formal FLUX.2 comparison: baseline + both proposed initial-noise methods
 
-The final comparison must live in **one fresh run directory**, so all methods have the same immutable manifest, normalization, model/sampler settings, prompt blocks, and metric versions. Do not append proposed methods to either baseline run: the run manifest intentionally prevents changing a configuration after generation.
+The final comparison must use one frozen formal block manifest, matched base-noise batches, generation configuration, normalization profile, and metric versions. The simplest workflow is one fresh full run; do not append proposed methods to a completed baseline-only run because its run manifest is immutable.
 
 Make a copy of the baseline config and freeze the full proposed-method grid, for example:
 
@@ -90,9 +81,9 @@ python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full
 ```
 
-This produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. `gamma=0` is represented by the shared baseline curve; `gamma=1` is a degenerate endpoint and is tested only at tensor level. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries. The analysis writes per-method, per-gamma Pareto and matched-diversity comparisons under `outputs/flux2_full/`.
+For **each quality–diversity metric pair**, this produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. The analysis writes a baseline-plus-one-gamma comparison for every proposed curve and a separate all-curve overview. `gamma=0` is represented by the shared baseline curve. At `gamma=1`, same-phase is exactly the baseline's cached base-white `epsilon` point, while independent-white is its cached independent `eta` point: it belongs to the same white-noise distribution but finite-sample metrics need not equal the baseline white point. Both are endpoint tensor tests only. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries.
 
-The preliminary and formal baseline-only runs validate the baseline procedure. **Final reported baseline and proposed-method curves must all be taken from the fresh full-comparison run** (`outputs/flux2_full/`), because only that run shares one frozen configuration, block manifest, and metric-version record across every plotted method.
+Final reported baseline and proposed-method results must use the same frozen formal block manifest, base-noise batches, generation configuration, normalization profile, metric versions, and complete-block intersection. The simplest workflow obtains them all from `outputs/flux2_full/`; previously generated baseline artefacts may be reused only when their provenance and hashes match exactly.
 
 Do not use `--conditions` for this formal run: it is only for controlled smoke subsets.
 
@@ -110,13 +101,11 @@ python3 -m unittest discover -s tests -v
 # 1. CPU tests
 python3 -m unittest discover -s tests -v
 
-# 2. Validate and run the baseline-only formal manifest
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage validate
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --run-id flux2_baseline_formal
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux2_baseline_formal
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_formal
+# 2. One-prompt smoke test (then optionally run a deliberately small pilot)
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --prompt "A photo of a red fox in snow" --batch-seed 10000 --conditions white,pink:0.5 --run-id flux_smoke
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux_smoke
 
-# 3. After creating the frozen full-grid config, validate and run it
+# 3. Validate and run the frozen full-grid formal configuration once
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage validate
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full

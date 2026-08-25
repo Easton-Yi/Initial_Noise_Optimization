@@ -208,8 +208,21 @@ def _plots(plot_dir: Path, rows: list[dict[str, Any]], config: dict[str, Any]) -
                 for row in series: axis.annotate(f"α={row['alpha']}", (row["diversity"], row["quality"]), fontsize=7)
             axis.set(xlabel=diversity, ylabel=quality, title=f"Q-D ({quality} / {diversity})")
             axis.legend(); axis.grid(alpha=.2)
-            target = plot_dir / "qd" / f"{quality}__{diversity}"; target.parent.mkdir(parents=True, exist_ok=True)
+            target = plot_dir / "qd" / f"{quality}__{diversity}__overview"; target.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
+            baseline_series = [row for row in current if row["curve_id"] == "baseline"]
+            for curve_id in sorted({row["curve_id"] for row in current if row["curve_id"] != "baseline"}):
+                fig, axis = plt.subplots(figsize=(6, 4))
+                for compared_curve, label in ((baseline_series, "baseline"), ([row for row in current if row["curve_id"] == curve_id], curve_id)):
+                    series = sorted(compared_curve, key=lambda row: float(row["alpha"]))
+                    raw_line, = axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=label)
+                    frontier = pareto_frontier(series)
+                    axis.plot([row["diversity"] for row in frontier], [row["quality"] for row in frontier], linestyle="--", marker="x", color=raw_line.get_color(), label=f"{label} Pareto")
+                    for row in series: axis.annotate(f"α={row['alpha']}", (row["diversity"], row["quality"]), fontsize=7)
+                axis.set(xlabel=diversity, ylabel=quality, title=f"Q-D: baseline vs {curve_id}")
+                axis.legend(); axis.grid(alpha=.2)
+                target = plot_dir / "qd" / f"{quality}__{diversity}__{curve_id}"
+                fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:
