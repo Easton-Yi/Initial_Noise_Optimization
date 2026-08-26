@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import importlib.metadata
 from dataclasses import dataclass
 from itertools import combinations
@@ -34,6 +35,17 @@ class MetricRunner:
     def metric_versions(self) -> dict[str, str]:
         return {"torch": torch.__version__, "transformers": _package_version("transformers"), "lpips": _package_version("lpips"),
                 "dreamsim": _package_version("dreamsim"), "vendi-score": _package_version("vendi-score"), "hpsv3": _package_version("hpsv3")}
+
+    def release_models(self) -> None:
+        """Release all GPU-backed metric models while retaining CPU embeddings."""
+        self._clip = None
+        self._processor = None
+        self._lpips = None
+        self._dreamsim = None
+        self._hps = None
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     def _load_clip(self) -> None:
         if self._clip is not None:
@@ -92,9 +104,10 @@ class MetricRunner:
                 from hpsv3 import HPSv3RewardInferencer  # type: ignore
             except ImportError as error:
                 raise ImportError("HPSv3 is enabled but unavailable; install its official package. HPSv2 is not substituted.") from error
-            # Official API: inferencer.reward(prompts, image_paths=...) returns
-            # (mu, sigma) reward tuples; this experiment records the scalar mu.
             self._hps = HPSv3RewardInferencer(device=str(self.device))
+        # The installed HPSv3 API accepts image_paths and prompts. It returns
+        # (mu, sigma) reward tuples; this experiment records the scalar mu.
+        with torch.inference_mode():
             rewards = self._hps.reward(image_paths=[str(image_path)], prompts=[prompt])
         return float(rewards[0][0].item())
 
@@ -116,11 +129,18 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
     current_input = {(row["block_id"], row["condition_id"], row["base_index"]) for row in rows}
     per_image: list[dict[str, Any]] = [r for r in existing if (r["block_id"], r["condition_id"], int(r.get("base_index", -1))) in current_input and r.get("metric_config_hash") == metric_hash]
     existing_records = {(r["block_id"], r["condition_id"], int(r.get("base_index", -1)), r["image_hash"], r["metric_config_hash"], r["metric"]) for r in per_image}
-    for row in rows:
-        path, digest = Path(row["image_path"]), file_hash(row["image_path"])
-        for metric, enabled in (("clip_cosine", config["quality_metrics"]["clip"]["enabled"]), ("hpsv3", config["quality_metrics"]["hpsv3"]["enabled"])):
+    # Run one quality model over the complete dataset, release it, and only
+    # then load the next model. HPSv3 and CLIP do not fit concurrently on a
+    # 24 GB GPU.
+    for metric, enabled in (("clip_cosine", config["quality_metrics"]["clip"]["enabled"]),
+                            ("hpsv3", config["quality_metrics"]["hpsv3"]["enabled"])):
+        if not enabled:
+            continue
+        checkpoint_counter = 0
+        for row in rows:
+            path, digest = Path(row["image_path"]), file_hash(row["image_path"])
             record_key = (row["block_id"], row["condition_id"], row["base_index"], digest, metric_hash, metric)
-            if not enabled or record_key in existing_records:
+            if record_key in existing_records:
                 continue
             cache_key = (digest, metric_hash, metric)
             score = score_cache.get(cache_key)
@@ -128,24 +148,39 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
                 score = runner.clip_cosine(path, row["prompt"]) if metric == "clip_cosine" else runner.hpsv3(path, row["prompt"])
                 score_cache[cache_key] = score
             per_image.append({**_common(row), "metric": metric, "score": score, "image_hash": digest, "metric_config_hash": metric_hash})
+            existing_records.add(record_key)
+            checkpoint_counter += 1
+            if checkpoint_counter % 100 == 0:
+                _write_csv(metrics_dir / "per_image.csv", per_image)
+        _write_csv(metrics_dir / "per_image.csv", per_image)
+        runner.release_models()
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault((row["block_id"], row["condition_id"]), []).append(row)
     pairs, per_group = [], _group_quality_rows(per_image)
-    for (block_id, condition), gallery in groups.items():
-        if len(gallery) != 4:
-            continue
-        gallery.sort(key=lambda value: value["base_index"])
-        for metric, enabled, fn in (("dreamsim_mean_pair_distance", config["diversity_metrics"]["dreamsim"]["enabled"], runner.dreamsim_distance),
-                                    ("lpips_alex_mean_pair_distance", config["diversity_metrics"]["lpips"]["enabled"], runner.lpips_distance)):
-            if enabled:
+    # Likewise, evaluate each pairwise diversity model in its own phase.
+    for metric, enabled, fn in (("dreamsim_mean_pair_distance", config["diversity_metrics"]["dreamsim"]["enabled"], runner.dreamsim_distance),
+                                ("lpips_alex_mean_pair_distance", config["diversity_metrics"]["lpips"]["enabled"], runner.lpips_distance)):
+        if enabled:
+            for (block_id, condition), gallery in groups.items():
+                if len(gallery) != 4:
+                    continue
+                gallery.sort(key=lambda value: value["base_index"])
                 values = []
                 for left, right in combinations(gallery, 2):
                     value = fn(Path(left["image_path"]), Path(right["image_path"]))
                     values.append(value)
                     pairs.append({**_common(left), "metric": metric, "left_base_index": left["base_index"], "right_base_index": right["base_index"], "score": value, "metric_config_hash": metric_hash})
                 per_group.append({**_common(gallery[0]), "metric": metric, "score": float(np.mean(values)), "n": 6, "metric_config_hash": metric_hash})
-        if config["diversity_metrics"]["vendi_clip"]["enabled"]:
+            _write_csv(metrics_dir / "per_pair.csv", pairs)
+            _write_csv(metrics_dir / "per_group.csv", per_group)
+            runner.release_models()
+
+    if config["diversity_metrics"]["vendi_clip"]["enabled"]:
+        for (block_id, condition), gallery in groups.items():
+            if len(gallery) != 4:
+                continue
+            gallery.sort(key=lambda value: value["base_index"])
             vectors = np.stack([runner.clip_embedding(Path(item["image_path"])) for item in gallery])
             kernel = vectors @ vectors.T
             kernel = (kernel + kernel.T) / 2
@@ -157,6 +192,8 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
                 raise ImportError("vendi-score is required for vendi_clip") from error
             value = float(vendi.score_K(kernel))
             per_group.append({**_common(gallery[0]), "metric": "vendi_clip", "score": value, "n": 4, "metric_config_hash": metric_hash})
+        _write_csv(metrics_dir / "per_group.csv", per_group)
+        runner.release_models()
     _write_csv(metrics_dir / "per_image.csv", per_image)
     _write_csv(metrics_dir / "per_pair.csv", pairs)
     _write_csv(metrics_dir / "per_group.csv", per_group)

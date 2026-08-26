@@ -50,7 +50,7 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
         key = (row["block_id"], row["condition_id"])
         values.setdefault(key, {})[row["metric"]] = float(row["score"])
         metadata.setdefault(key, row)
-    aggregates, paired, frontier_rows, improvement_rows, improvement_summary_rows, interval_rows = [], [], [], [], [], []
+    aggregates, paired, frontier_rows, improvement_rows, interval_rows = [], [], [], [], []
     conditions = sorted({condition for _, condition in values})
     for quality in quality_metrics:
         for diversity in diversity_metrics:
@@ -72,25 +72,19 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                 if len(baseline) < 2 or len(ours) < 2: continue
                 lo, hi = max(baseline[0]["diversity"], ours[0]["diversity"]), min(baseline[-1]["diversity"], ours[-1]["diversity"])
                 if lo > hi:
-                    unavailable = {"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": False, "reason": "no_shared_diversity_range"}
-                    improvement_rows.append(unavailable)
-                    improvement_summary_rows.append(unavailable)
+                    improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": False, "reason": "no_shared_diversity_range"})
                     continue
                 targets = [float(value) for value in np.linspace(lo, hi, 25)]
-                uncertainties, summary_uncertainty = _bootstrap_matched_improvements(
+                uncertainties = _bootstrap_matched_improvements(
                     values,
                     [row["condition_id"] for row in curve_rows if row["curve_id"] == "baseline"],
                     [row["condition_id"] for row in curve_rows if row["curve_id"] == curve_id],
                     quality, diversity, targets, config["analysis"],
                 )
-                point_improvements = []
                 for target, uncertainty in zip(targets, uncertainties):
                     q_base, q_ours = interpolate_within(baseline, float(target)), interpolate_within(ours, float(target))
                     if q_base is not None and q_ours is not None:
-                        delta = q_ours - q_base
-                        point_improvements.append(delta)
-                        improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": True, "target_diversity": target, "quality_improvement": delta, **uncertainty})
-                improvement_summary_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": bool(point_improvements), "matched_diversity_low": lo, "matched_diversity_high": hi, "mean_quality_improvement": float(np.mean(point_improvements)) if point_improvements else "", **summary_uncertainty})
+                        improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": True, "target_diversity": target, "quality_improvement": q_ours - q_base, **uncertainty})
     # Paired effects use only block intersections, never individual images/pairs.
     for condition in conditions:
         family = _condition_metadata(metadata[(next(block for block, candidate in values if candidate == condition), condition)])["family"]
@@ -104,14 +98,12 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                 if common:
                     diffs = np.array([values[(b, condition)][quality] - values[(b, reference)][quality] for b in common])
                     interval_rows.append({"condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity, **_bootstrap(diffs, config["analysis"])})
-    tables_dir = analysis_dir / "tables"
-    _write_csv(tables_dir / "all_curve_points.csv", aggregates)
-    _write_csv(tables_dir / "paired_effects.csv", paired)
-    _write_csv(tables_dir / "qd_frontiers.csv", frontier_rows)
-    _write_csv(tables_dir / "matched_diversity.csv", improvement_rows)
-    _write_csv(tables_dir / "matched_diversity_summary.csv", improvement_summary_rows)
-    _write_csv(tables_dir / "bootstrap_results.csv", interval_rows)
-    _plots(analysis_dir, aggregates, improvement_summary_rows, config)
+    _write_csv(analysis_dir / "aggregate_conditions.csv", aggregates)
+    _write_csv(analysis_dir / "paired_effects.csv", paired)
+    _write_csv(analysis_dir / "qd_frontiers.csv", frontier_rows)
+    _write_csv(analysis_dir / "qd_improvement_at_matched_diversity.csv", improvement_rows)
+    _write_csv(analysis_dir / "bootstrap_intervals.csv", interval_rows)
+    _plots(run_dir / "plots", aggregates, config)
 
 
 def _condition_metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -140,30 +132,23 @@ def _bootstrap(values: np.ndarray, config: dict[str, Any]) -> dict[str, Any]:
     return {"point_estimate": float(values.mean()), "standard_error": float(means.std(ddof=1)), "ci_low": float(np.quantile(means, alpha)), "ci_high": float(np.quantile(means, 1 - alpha)), "block_count": len(values)}
 
 
-def _bootstrap_matched_improvements(values: dict[tuple[str, str], dict[str, float]], baseline_conditions: list[str], ours_conditions: list[str], quality: str, diversity: str, targets: list[float], config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _bootstrap_matched_improvements(values: dict[tuple[str, str], dict[str, float]], baseline_conditions: list[str], ours_conditions: list[str], quality: str, diversity: str, targets: list[float], config: dict[str, Any]) -> list[dict[str, Any]]:
     """Paired cluster bootstrap that recomputes curves/frontiers inside every draw."""
     baseline_conditions, ours_conditions = sorted(set(baseline_conditions)), sorted(set(ours_conditions))
     required = baseline_conditions + ours_conditions
     blocks = sorted({block for block, _ in values if all((block, condition) in values and quality in values[(block, condition)] and diversity in values[(block, condition)] for condition in required)})
     if not blocks:
-        unavailable = {"bootstrap_replicates": 0, "bootstrap_standard_error": "", "bootstrap_ci_low": "", "bootstrap_ci_high": ""}
-        return [unavailable.copy() for _ in targets], unavailable
+        return [{"bootstrap_replicates": 0, "bootstrap_standard_error": "", "bootstrap_ci_low": "", "bootstrap_ci_high": ""} for _ in targets]
     rng = np.random.default_rng(int(config["bootstrap_seed"]))
     differences = [[] for _ in targets]
-    mean_differences = []
     for _ in range(int(config["bootstrap_replicates"])):
         sampled = [blocks[index] for index in rng.integers(0, len(blocks), len(blocks))]
         baseline = _bootstrap_curve(values, baseline_conditions, sampled, quality, diversity)
         ours = _bootstrap_curve(values, ours_conditions, sampled, quality, diversity)
-        replicate_differences = []
         for index, target in enumerate(targets):
             base_value, ours_value = interpolate_within(baseline, target), interpolate_within(ours, target)
             if base_value is not None and ours_value is not None:
-                difference = ours_value - base_value
-                differences[index].append(difference)
-                replicate_differences.append(difference)
-        if replicate_differences:
-            mean_differences.append(float(np.mean(replicate_differences)))
+                differences[index].append(ours_value - base_value)
     alpha = (1 - float(config["confidence_level"])) / 2
     results = []
     for difference in differences:
@@ -173,13 +158,7 @@ def _bootstrap_matched_improvements(values: dict[tuple[str, str], dict[str, floa
         samples = np.asarray(difference)
         results.append({"bootstrap_replicates": len(samples), "bootstrap_standard_error": float(samples.std(ddof=1)) if len(samples) > 1 else 0.0,
                         "bootstrap_ci_low": float(np.quantile(samples, alpha)), "bootstrap_ci_high": float(np.quantile(samples, 1 - alpha))})
-    if not mean_differences:
-        summary = {"bootstrap_replicates": 0, "bootstrap_standard_error": "", "bootstrap_ci_low": "", "bootstrap_ci_high": ""}
-    else:
-        samples = np.asarray(mean_differences)
-        summary = {"bootstrap_replicates": len(samples), "bootstrap_standard_error": float(samples.std(ddof=1)) if len(samples) > 1 else 0.0,
-                   "bootstrap_ci_low": float(np.quantile(samples, alpha)), "bootstrap_ci_high": float(np.quantile(samples, 1 - alpha))}
-    return results, summary
+    return results
 
 
 def _bootstrap_curve(values: dict[tuple[str, str], dict[str, float]], conditions: list[str], sampled_blocks: list[str], quality: str, diversity: str) -> list[dict[str, float]]:
@@ -192,138 +171,58 @@ def _se(values: np.ndarray) -> float:
     return float(values.std(ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
 
 
-def _plots(analysis_dir: Path, rows: list[dict[str, Any]], summaries: list[dict[str, Any]], config: dict[str, Any]) -> None:
-    """Render the compact, pre-registered figure set; tables retain every curve."""
-    pairs = sorted({(row["quality_metric"], row["diversity_metric"]) for row in rows})
-    if not pairs:
-        return
-    requested = config["analysis"].get("primary_metric_pair", {})
-    primary = (requested.get("quality", "hpsv3"), requested.get("diversity", "dreamsim_mean_pair_distance"))
-    if primary not in pairs:
-        raise RuntimeError(f"Configured primary metric pair has no complete results: {primary}")
-    primary_rows = _pair_rows(rows, primary)
-    _plot_baseline_qd(analysis_dir / "primary" / "baseline_qd.png", primary_rows, primary)
-    has_proposed = any(row["curve_id"] != "baseline" for row in rows)
-    if not has_proposed:
-        return
-    _plot_methods_two_panel(analysis_dir / "primary" / "methods_qd_two_panel.png", primary_rows, primary)
-    _plot_matched_diversity_gain(analysis_dir / "primary" / "matched_diversity_gain.png", _pair_rows(summaries, primary), primary)
-    for pair in pairs:
-        if pair == primary:
-            continue
-        pair_dir = analysis_dir / "robustness" / _pair_token(pair)
-        pair_rows = _pair_rows(rows, pair)
-        _plot_methods_two_panel(pair_dir / "methods_qd_two_panel.png", pair_rows, pair)
-        _plot_matched_diversity_gain(pair_dir / "matched_diversity_gain.png", _pair_rows(summaries, pair), pair)
-    for detail in config["analysis"].get("optional_detail_curves", []):
-        if not isinstance(detail, dict) or "curve_id" not in detail:
-            raise ValueError("analysis.optional_detail_curves entries must be mappings with curve_id")
-        pair = (detail.get("quality", primary[0]), detail.get("diversity", primary[1]))
-        if pair not in pairs:
-            raise ValueError(f"Optional detail refers to unavailable metric pair: {pair}")
-        _plot_single_curve_comparison(analysis_dir / "optional_details" / _pair_token(pair) / f"{detail['curve_id']}.png", _pair_rows(rows, pair), pair, detail["curve_id"])
-
-
-def _pair_rows(rows: list[dict[str, Any]], pair: tuple[str, str]) -> list[dict[str, Any]]:
-    return [row for row in rows if row["quality_metric"] == pair[0] and row["diversity_metric"] == pair[1]]
-
-
-def _pair_token(pair: tuple[str, str]) -> str:
-    return f"{pair[0]}__{pair[1]}"
-
-
-def _metric_label(metric: str) -> str:
-    return {"hpsv3": "HPSv3", "clip_cosine": "CLIP cosine", "dreamsim_mean_pair_distance": "DreamSim distance", "lpips_alex_mean_pair_distance": "LPIPS-Alex distance", "vendi_clip": "Vendi-CLIP"}.get(metric, metric)
-
-
-def _save_figure(figure, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(target, dpi=220, bbox_inches="tight")
+def _plots(plot_dir: Path, rows: list[dict[str, Any]], config: dict[str, Any]) -> None:
     import matplotlib.pyplot as plt
-    plt.close(figure)
-
-
-def _series(rows: list[dict[str, Any]], curve_id: str) -> list[dict[str, Any]]:
-    return sorted([row for row in rows if row["curve_id"] == curve_id], key=lambda row: float(row["alpha"]))
-
-
-def _plot_baseline(axis, rows: list[dict[str, Any]]) -> None:
-    series = _series(rows, "baseline")
-    if not series:
-        raise RuntimeError("A Q-D comparison requires the baseline curve")
-    axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color="black", marker="o", linewidth=2.2, label="baseline")
-
-
-def _style_qd_axis(axis, pair: tuple[str, str], title: str) -> None:
-    axis.set(xlabel=_metric_label(pair[1]), ylabel=_metric_label(pair[0]), title=title)
-    axis.grid(alpha=.2)
-
-
-def _plot_baseline_qd(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
-    import matplotlib.pyplot as plt
-    figure, axis = plt.subplots(figsize=(6, 4.5))
-    _plot_baseline(axis, rows)
-    for row in _series(rows, "baseline"):
-        axis.annotate(f"α={float(row['alpha']):.1f}", (row["diversity"], row["quality"]), fontsize=8, xytext=(3, 3), textcoords="offset points")
-    _style_qd_axis(axis, pair, "Baseline Q–D curve")
-    axis.legend(frameon=False)
-    _save_figure(figure, target)
-
-
-def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str]) -> None:
-    import matplotlib.pyplot as plt
-    _plot_baseline(axis, rows)
-    cmap = plt.colormaps["Blues" if family == "same_phase" else "Oranges"]
-    curve_ids = sorted({row["curve_id"] for row in rows if row["family"] == family}, key=lambda value: float(value.rsplit("_", 1)[1]))
-    for curve_id in curve_ids:
-        series = _series(rows, curve_id)
-        gamma = float(series[0]["gamma"])
-        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=3, linewidth=1.25, label=f"γ={gamma:.1f}")
-    _style_qd_axis(axis, pair, "Same-phase" if family == "same_phase" else "Independent-white")
-    axis.legend(ncol=2, fontsize=8, frameon=False)
-
-
-def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
-    import matplotlib.pyplot as plt
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
-    _plot_family_panel(axes[0], rows, "same_phase", pair)
-    _plot_family_panel(axes[1], rows, "independent_white", pair)
-    figure.suptitle(f"Q–D comparison: {_metric_label(pair[0])} × {_metric_label(pair[1])}")
-    _save_figure(figure, target)
-
-
-def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
-    import matplotlib.pyplot as plt
-    figure, axis = plt.subplots(figsize=(6, 4.5))
-    styles = (("same_phase", "Same-phase", "#2166ac"), ("independent_white", "Independent-white", "#b35806"))
-    for family, label, color in styles:
-        series = sorted([row for row in rows if row.get("family") == family and row.get("available")], key=lambda row: float(row["gamma"]))
-        if not series:
-            continue
-        gamma = [float(row["gamma"]) for row in series]
-        gain = [float(row["mean_quality_improvement"]) for row in series]
-        lower = [value - float(row["bootstrap_ci_low"]) for value, row in zip(gain, series)]
-        upper = [float(row["bootstrap_ci_high"]) - value for value, row in zip(gain, series)]
-        axis.errorbar(gamma, gain, yerr=[lower, upper], color=color, marker="o", capsize=3, label=label)
-    axis.axhline(0, color="black", linewidth=.8)
-    axis.set(xlabel="γ", ylabel="Mean Δ quality at matched diversity", title="Matched-diversity quality gain")
-    axis.set_xticks([round(index / 10, 1) for index in range(1, 10)])
-    axis.grid(alpha=.2)
-    axis.legend(frameon=False)
-    _save_figure(figure, target)
-
-
-def _plot_single_curve_comparison(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], curve_id: str) -> None:
-    import matplotlib.pyplot as plt
-    if not _series(rows, curve_id):
-        raise ValueError(f"Optional detail curve is unavailable: {curve_id}")
-    figure, axis = plt.subplots(figsize=(6, 4.5))
-    _plot_baseline(axis, rows)
-    series = _series(rows, curve_id)
-    axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=curve_id)
-    _style_qd_axis(axis, pair, f"Baseline vs {curve_id}")
-    axis.legend(frameon=False)
-    _save_figure(figure, target)
+    # Quality/alpha and diversity/alpha views. ``rows`` contains a
+    # quality value once per diversity pairing, so deduplicate by condition.
+    for metric, value_key, error_key, directory in [
+        ("clip_cosine", "quality", "quality_se", "baseline"), ("hpsv3", "quality", "quality_se", "baseline"),
+        ("dreamsim_mean_pair_distance", "diversity", "diversity_se", "baseline"),
+        ("lpips_alex_mean_pair_distance", "diversity", "diversity_se", "baseline"), ("vendi_clip", "diversity", "diversity_se", "baseline"),
+    ]:
+        relevant = [row for row in rows if (row["quality_metric"] == metric if value_key == "quality" else row["diversity_metric"] == metric)]
+        unique = {row["condition_id"]: row for row in relevant}.values()
+        for curve_id in sorted({row["curve_id"] for row in unique}):
+            series = [row for row in unique if row["curve_id"] == curve_id]
+            if not series: continue
+            series = sorted(series, key=lambda row: float(row["alpha"]))
+            fig, axis = plt.subplots(figsize=(6, 4))
+            axis.errorbar([float(row["alpha"]) for row in series], [float(row[value_key]) for row in series],
+                          yerr=[[float(row[value_key]) - float(row[f"{value_key}_ci_low"]) for row in series],
+                                [float(row[f"{value_key}_ci_high"]) - float(row[value_key]) for row in series]], marker="o", capsize=3)
+            axis.set(xlabel="alpha", ylabel=metric, title=f"{metric} vs alpha ({curve_id})")
+            axis.grid(alpha=.2)
+            target = plot_dir / ("baseline" if curve_id == "baseline" else "methods") / f"{curve_id}__{metric}__alpha"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
+    for quality in ("clip_cosine", "hpsv3"):
+        for diversity in ("dreamsim_mean_pair_distance", "lpips_alex_mean_pair_distance", "vendi_clip"):
+            current = [row for row in rows if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
+            if not current: continue
+            fig, axis = plt.subplots(figsize=(6, 4))
+            for curve_id in sorted({row["curve_id"] for row in current}):
+                series = sorted([row for row in current if row["curve_id"] == curve_id], key=lambda row: float(row["alpha"]))
+                raw_line, = axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=curve_id)
+                frontier = pareto_frontier(series)
+                axis.plot([row["diversity"] for row in frontier], [row["quality"] for row in frontier], linestyle="--", marker="x", color=raw_line.get_color(), label=f"{curve_id} Pareto")
+                for row in series: axis.annotate(f"α={row['alpha']}", (row["diversity"], row["quality"]), fontsize=7)
+            axis.set(xlabel=diversity, ylabel=quality, title=f"Q-D ({quality} / {diversity})")
+            axis.legend(); axis.grid(alpha=.2)
+            target = plot_dir / "qd" / f"{quality}__{diversity}__overview"; target.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
+            baseline_series = [row for row in current if row["curve_id"] == "baseline"]
+            for curve_id in sorted({row["curve_id"] for row in current if row["curve_id"] != "baseline"}):
+                fig, axis = plt.subplots(figsize=(6, 4))
+                for compared_curve, label in ((baseline_series, "baseline"), ([row for row in current if row["curve_id"] == curve_id], curve_id)):
+                    series = sorted(compared_curve, key=lambda row: float(row["alpha"]))
+                    raw_line, = axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], marker="o", label=label)
+                    frontier = pareto_frontier(series)
+                    axis.plot([row["diversity"] for row in frontier], [row["quality"] for row in frontier], linestyle="--", marker="x", color=raw_line.get_color(), label=f"{label} Pareto")
+                    for row in series: axis.annotate(f"α={row['alpha']}", (row["diversity"], row["quality"]), fontsize=7)
+                axis.set(xlabel=diversity, ylabel=quality, title=f"Q-D: baseline vs {curve_id}")
+                axis.legend(); axis.grid(alpha=.2)
+                target = plot_dir / "qd" / f"{quality}__{diversity}__{curve_id}"
+                fig.savefig(target.with_suffix(".png"), dpi=180, bbox_inches="tight"); fig.savefig(target.with_suffix(".pdf"), bbox_inches="tight"); plt.close(fig)
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:
@@ -336,3 +235,4 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fields = sorted({key for row in rows for key in row})
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        
