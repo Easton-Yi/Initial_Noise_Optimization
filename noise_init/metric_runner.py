@@ -95,7 +95,7 @@ class MetricRunner:
             # Official API: inferencer.reward(prompts, image_paths=...) returns
             # (mu, sigma) reward tuples; this experiment records the scalar mu.
             self._hps = HPSv3RewardInferencer(device=str(self.device))
-        rewards = self._hps.reward([prompt], image_paths=[str(image_path)])
+            rewards = self._hps.reward(image_paths=[str(image_path)], prompts=[prompt])
         return float(rewards[0][0].item())
 
 
