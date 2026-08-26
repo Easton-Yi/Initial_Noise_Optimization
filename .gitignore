@@ -9,6 +9,7 @@ __pycache__/
 venv/
 
 # Experiment artefacts and heavyweight local caches
+openai
 noise_init/outputs/
 noise_init/cache/
 noise_init/.cache/
