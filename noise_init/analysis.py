@@ -279,6 +279,29 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
         axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=3, linewidth=1.25, label=f"γ={gamma:.1f}")
     _style_qd_axis(axis, pair, "Same-phase" if family == "same_phase" else "Independent-white")
     axis.legend(ncol=2, fontsize=8, frameon=False)
+    # The baseline can span much more of the Q-D plane than the proposed
+    # sweeps.  Retain that global context, but also show the eight alpha points
+    # of every fixed-gamma curve at a readable scale.
+    proposed = [row for row in rows if row["family"] == family]
+    if proposed:
+        inset = axis.inset_axes([.53, .08, .43, .34])
+        for curve_id in curve_ids:
+            series = _series(rows, curve_id)
+            gamma = float(series[0]["gamma"])
+            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=2.5, linewidth=1.0)
+        diversity = [float(row["diversity"]) for row in proposed]
+        quality = [float(row["quality"]) for row in proposed]
+        inset.set_xlim(*_padded_limits(diversity))
+        inset.set_ylim(*_padded_limits(quality))
+        inset.set_title("Zoom: proposed alpha sweeps", fontsize=7)
+        inset.tick_params(labelsize=6)
+        inset.grid(alpha=.2)
+
+
+def _padded_limits(values: list[float]) -> tuple[float, float]:
+    lower, upper = min(values), max(values)
+    padding = max((upper - lower) * .12, 1e-8)
+    return lower - padding, upper + padding
 
 
 def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
