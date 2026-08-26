@@ -69,9 +69,18 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     if config["experiment"].get("noise_construction_version") != NOISE_CONSTRUCTION_VERSION: raise ValueError("Unsupported noise construction version")
     if config["experiment"].get("latent_injection_verification") != LATENT_INJECTION_VERIFICATION_VERSION: raise ValueError("Unsupported latent injection verification version")
     if config["experiment"]["normalization_profile"] not in {"per_sample_per_channel_zero_mean_unit_std", "divgen_compat", "none"}: raise ValueError("Invalid normalization profile")
+    primary_pair = config["analysis"].get("primary_metric_pair", {})
+    if not isinstance(primary_pair, dict) or set(primary_pair) != {"quality", "diversity"}: raise ValueError("analysis.primary_metric_pair must contain quality and diversity")
+    if primary_pair["quality"] not in {"hpsv3", "clip_cosine"} or primary_pair["diversity"] not in {"dreamsim_mean_pair_distance", "lpips_alex_mean_pair_distance", "vendi_clip"}:
+        raise ValueError("analysis.primary_metric_pair contains an unknown metric name")
+    if not isinstance(config["analysis"].get("optional_detail_curves", []), list): raise ValueError("analysis.optional_detail_curves must be a list")
     if config["model"]["adapter"] not in {"flux2_klein", "sdxl_turbo"}: raise ValueError("Only flux2_klein and sdxl_turbo adapters are supported")
     if config["diversity_metrics"]["vendi_clip"].get("enabled", False) and config["diversity_metrics"]["vendi_clip"]["embedding_checkpoint"] != config["quality_metrics"]["clip"]["checkpoint"]:
         raise ValueError("This compact runner uses one frozen CLIP encoder; vendi_clip.embedding_checkpoint must equal quality_metrics.clip.checkpoint")
+    enabled_quality = {"clip_cosine" if name == "clip" else name for name, section in config["quality_metrics"].items() if section.get("enabled", False)}
+    enabled_diversity = {"dreamsim_mean_pair_distance" if name == "dreamsim" else "lpips_alex_mean_pair_distance" if name == "lpips" else name for name, section in config["diversity_metrics"].items() if section.get("enabled", False)}
+    if primary_pair["quality"] not in enabled_quality or primary_pair["diversity"] not in enabled_diversity:
+        raise ValueError("analysis.primary_metric_pair must refer to enabled metrics")
     for name in ("baseline", "same_phase_floor", "independent_white"):
         section = config[name]
         for alpha in section["alpha_values"]:

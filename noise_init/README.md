@@ -71,13 +71,35 @@ python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full
 ```
 
-For **each quality–diversity metric pair**, this produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. The analysis writes a baseline-plus-one-gamma comparison for every proposed curve and a separate all-curve overview. `gamma=0` is represented by the shared baseline curve. At `gamma=1`, same-phase is exactly the baseline's cached base-white `epsilon` point, while independent-white is its cached independent `eta` point: it belongs to the same white-noise distribution but finite-sample metrics need not equal the baseline white point. Both are endpoint tensor tests only. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries.
+For **each quality–diversity metric pair**, this produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. All curve points, frontiers, matched-diversity values, and bootstrap results are retained in machine-readable tables. Default figures are deliberately compact: HPSv3 × DreamSim is the pre-registered primary pair, while the other pairs are robustness checks. `gamma=0` is represented by the shared baseline curve. At `gamma=1`, same-phase is exactly the baseline's cached base-white `epsilon` point, while independent-white is its cached independent `eta` point: it belongs to the same white-noise distribution but finite-sample metrics need not equal the baseline white point. Both are endpoint tensor tests only. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries.
 
 Final reported baseline and proposed-method results must use the same frozen formal block manifest, base-noise batches, generation configuration, normalization profile, metric versions, and complete-block intersection. The simplest workflow obtains them all from `outputs/flux2_full/`; previously generated baseline artefacts may be reused only when their provenance and hashes match exactly.
 
 Do not use `--conditions` for this formal run: it is only for controlled smoke subsets.
 
 `--force` can recreate derived metric outputs but cannot replace a cached source-noise batch, generated PNG, or immutable run configuration. Use a new `--run-id` for a deliberately new experiment.
+
+## Compact analysis outputs
+
+`analyze` writes all statistics under `analysis/tables/`, including every curve point, per-gamma matched-diversity values, per-gamma mean matched-diversity gain, Pareto frontiers, paired effects, and bootstrap intervals. It does not default to one figure per gamma.
+
+With all six metric pairs enabled, it writes 13 PNG figures:
+
+- `analysis/primary/baseline_qd.png`: HPSv3 × DreamSim baseline alpha curve;
+- `analysis/primary/methods_qd_two_panel.png`: baseline plus nine same-phase curves on the left and baseline plus nine independent-white curves on the right; gamma colours run light-to-dark within each panel;
+- `analysis/primary/matched_diversity_gain.png`: mean quality gain over the observed matched-diversity interval, by gamma, with paired-bootstrap CIs;
+- for each of the five remaining metric pairs, one two-panel Q–D robustness figure and one matched-diversity gain summary.
+
+The detailed 25-target matched-diversity values remain in `analysis/tables/matched_diversity.csv`; the gamma summary used in the figure is in `analysis/tables/matched_diversity_summary.csv`. To request an individual baseline-versus-one-gamma plot, add an explicit item to `analysis.optional_detail_curves`, for example:
+
+```yaml
+optional_detail_curves:
+  - quality: hpsv3
+    diversity: dreamsim_mean_pair_distance
+    curve_id: same_phase_gamma_0.5
+```
+
+This produces only that requested detail under `analysis/optional_details/`; it does not alter the formal grid or omit any reported gamma from the tables.
 
 ## Minimum formal run order
 

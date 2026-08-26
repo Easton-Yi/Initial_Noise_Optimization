@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import _curve_id, interpolate_within, pareto_frontier
+from analysis import _bootstrap_matched_improvements, _curve_id, interpolate_within, pareto_frontier
 from metric_runner import _group_quality_rows
 
 
@@ -31,6 +31,18 @@ class MetricContractTests(unittest.TestCase):
         self.assertEqual(_curve_id({"family": "baseline", "gamma": ""}), "baseline")
         self.assertEqual(_curve_id({"family": "same_phase", "gamma": "0.1"}), "same_phase_gamma_0.1")
         self.assertEqual(_curve_id({"family": "independent_white", "gamma": .9}), "independent_white_gamma_0.9")
+
+    def test_matched_diversity_bootstrap_includes_a_per_gamma_summary(self):
+        values = {}
+        for block, offset in (("b0", 0.0), ("b1", .01)):
+            values[block, "baseline/alpha_0p0"] = {"q": .8 + offset, "d": .2}
+            values[block, "baseline/alpha_0p7"] = {"q": .6 + offset, "d": .6}
+            values[block, "same_phase/alpha_0p0_gamma_0p5"] = {"q": .85 + offset, "d": .2}
+            values[block, "same_phase/alpha_0p7_gamma_0p5"] = {"q": .7 + offset, "d": .6}
+        points, summary = _bootstrap_matched_improvements(values, ["baseline/alpha_0p0", "baseline/alpha_0p7"], ["same_phase/alpha_0p0_gamma_0p5", "same_phase/alpha_0p7_gamma_0p5"], "q", "d", [.2, .4, .6], {"bootstrap_replicates": 10, "bootstrap_seed": 1, "confidence_level": .95})
+        self.assertEqual(len(points), 3)
+        self.assertEqual(summary["bootstrap_replicates"], 10)
+        self.assertGreater(summary["bootstrap_ci_high"], 0)
 
 
 if __name__ == "__main__": unittest.main()

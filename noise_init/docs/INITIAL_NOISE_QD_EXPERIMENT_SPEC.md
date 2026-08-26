@@ -425,6 +425,10 @@ analysis:
   confidence_level: 0.95
   compare_on_pareto_frontier: true
   prohibit_extrapolation: true
+  primary_metric_pair:
+    quality: hpsv3
+    diversity: dreamsim_mean_pair_distance
+  optional_detail_curves: []
 ```
 
 All configuration values must be copied into an immutable run manifest before generation starts.
@@ -492,15 +496,22 @@ outputs/<run_id>/
     per_group.csv
     metric_manifest.json
   analysis/
-    aggregate_conditions.csv
-    paired_effects.csv
-    qd_frontiers.csv
-    qd_improvement_at_matched_diversity.csv
-    bootstrap_intervals.csv
-  plots/
-    baseline/
-    methods/
-    qd/
+    primary/
+      baseline_qd.png
+      methods_qd_two_panel.png
+      matched_diversity_gain.png
+    robustness/
+      <quality>__<diversity>/
+        methods_qd_two_panel.png
+        matched_diversity_gain.png
+    optional_details/
+    tables/
+      all_curve_points.csv
+      paired_effects.csv
+      qd_frontiers.csv
+      matched_diversity.csv
+      matched_diversity_summary.csv
+      bootstrap_results.csv
   logs/
 ```
 
@@ -591,7 +602,7 @@ Rules:
 - use the same set of complete blocks for every condition compared on a curve;
 - if a block is missing one condition, either regenerate it or use the common complete-block intersection and report the reduced count;
 - never average already-aggregated prompt means with unequal hidden weights;
-- produce separate Q–D plots for every quality/diversity metric pair;
+- retain separate Q–D values and matched-diversity calculations for every quality/diversity metric pair; render the pre-registered primary pair prominently and compact robustness summaries for the remaining pairs;
 - never combine DreamSim, LPIPS, and Vendi into an unnamed single diversity number.
 
 ### 12.1 Confidence intervals
@@ -617,40 +628,21 @@ $$
 
 For each proposed condition relative to the simple-pink baseline at the same alpha, calculate the analogous paired differences. Store them in `paired_effects.csv`.
 
-## 13. Required plots
+## 13. Required analysis outputs
 
-### 13.1 Baseline
+### 13.1 Compact figure set
 
-For each quality metric:
+Pre-register `HPSv3 × DreamSim` as the primary quality–diversity pair. The default primary output is exactly three figures:
 
-- quality versus alpha, with mean and 95% CI;
+1. one labeled baseline Q–D alpha curve;
+2. one two-panel comparison, with baseline plus all nine same-phase gamma curves on the left and baseline plus all nine independent-white gamma curves on the right; use a continuous light-to-dark gamma colour scale within each panel;
+3. one matched-diversity gain summary versus gamma, with separate method lines and paired-bootstrap confidence intervals.
 
-For each diversity metric:
+For every non-primary quality/diversity pair, render only the two-panel Q–D overview and the matched-diversity gain summary. Thus six enabled metric pairs produce 13 default PNG figures, not one figure per gamma. The complete 19 curves per pair and all raw points remain in machine-readable tables. Never select a gamma solely because it looks best; the complete gamma scan remains reported in the tables and summaries.
 
-- diversity versus alpha, with mean and 95% CI;
+Do not generate an individual baseline-plus-one-gamma figure unless it is explicitly listed in `analysis.optional_detail_curves` with a metric pair and `curve_id`. Optional details are diagnostic/supplementary artefacts, not a substitute for the compact registered figure set.
 
-For every quality/diversity pair:
-
-- Q–D scatter/curve with one labeled point per alpha;
-- both PNG and vector PDF/SVG output;
-- display block count and metric/checkpoint names in metadata or caption.
-
-### 13.2 Proposed methods
-
-For each fixed gamma and for each proposed method:
-
-- quality versus alpha;
-- diversity versus alpha;
-- one Q–D curve whose points sweep alpha from `0.0` to `0.7`;
-- overlay the baseline alpha-sweep curve for direct comparison;
-- visually distinguish gamma curves and raw condition paths from Pareto frontiers;
-- label alpha values on points and gamma values in legends.
-
-Produce a baseline-plus-one-gamma figure for each `(method, gamma)` curve. An additional all-curve overview is useful for context, but it must not replace the per-gamma comparisons.
-
-Also provide optional fixed-alpha cross-sections versus gamma for diagnosis, but do not use those cross-sections as the primary Q–D comparison.
-
-### 13.3 Same-diversity comparison
+### 13.2 Same-diversity comparison
 
 Raw parameter sweeps may be non-monotonic. Therefore:
 
