@@ -285,15 +285,17 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
     proposed = [row for row in rows if row["family"] == family]
     if proposed:
         inset = axis.inset_axes([.53, .08, .43, .34])
+        baseline = _series(rows, "baseline")
+        inset.plot([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", marker="o", markersize=2.8, linewidth=1.5, zorder=1)
         for curve_id in curve_ids:
             series = _series(rows, curve_id)
             gamma = float(series[0]["gamma"])
-            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=2.5, linewidth=1.0)
+            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=2.5, linewidth=1.0, zorder=2)
         diversity = [float(row["diversity"]) for row in proposed]
         quality = [float(row["quality"]) for row in proposed]
         inset.set_xlim(*_padded_limits(diversity))
         inset.set_ylim(*_padded_limits(quality))
-        inset.set_title("Zoom: proposed alpha sweeps", fontsize=7)
+        inset.set_title("Zoom: baseline + proposed sweeps", fontsize=7)
         inset.tick_params(labelsize=6)
         inset.grid(alpha=.2)
 
