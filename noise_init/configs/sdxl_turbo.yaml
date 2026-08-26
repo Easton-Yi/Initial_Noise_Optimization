@@ -5,6 +5,7 @@ experiment:
   normalization_profile: per_sample_per_channel_zero_mean_unit_std
   noise_frequency_grid: divgen_integer_fft_bin_indices_v1
   noise_construction_version: exact_white_endpoints_profiled_normalization_v2
+  latent_injection_verification: prepare_latents_capture_v1
 paths: {outputs_root: outputs}
 model:
   adapter: sdxl_turbo

@@ -52,6 +52,19 @@ class NoiseMethodTests(unittest.TestCase):
         self.assertEqual(tuple(raw.shape), self.shape)
         self.assertTrue(torch.isfinite(raw).all())
 
+    def test_non_endpoint_alpha_and_gamma_change_constructed_noise(self):
+        profile = "per_sample_per_channel_zero_mean_unit_std"
+        same_low = construct_noise(self.batch, "same_phase", .2, .1, profile)
+        same_high = construct_noise(self.batch, "same_phase", .7, .8, profile)
+        independent_low = construct_noise(self.batch, "independent_white", .2, .1, profile)
+        independent_high = construct_noise(self.batch, "independent_white", .7, .8, profile)
+        self.assertFalse(torch.equal(same_low, same_high))
+        self.assertFalse(torch.equal(independent_low, independent_high))
+        # A gallery is four independent base samples, never four duplicated
+        # copies of one condition tensor.
+        self.assertFalse(torch.equal(same_low[0], same_low[1]))
+        self.assertFalse(torch.equal(independent_low[0], independent_low[1]))
+
     def test_integer_frequency_grid_matches_divgen_filter_strength(self):
         radial = radial_frequency_grid(128, 128)
         multiplier = (1 + radial).pow(-.5)

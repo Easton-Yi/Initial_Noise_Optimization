@@ -21,6 +21,7 @@ from noise_methods import construct_noise, load_or_create_noise_batch, noise_sta
 REQUIRED_TOP_LEVEL = {"experiment", "model", "generation", "blocks", "baseline", "same_phase_floor", "independent_white", "quality_metrics", "diversity_metrics", "analysis"}
 NOISE_FREQUENCY_GRID_VERSION = "divgen_integer_fft_bin_indices_v1"
 NOISE_CONSTRUCTION_VERSION = "exact_white_endpoints_profiled_normalization_v2"
+LATENT_INJECTION_VERIFICATION_VERSION = "prepare_latents_capture_v1"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
     # runs made with the earlier normalized-frequency implementation.
     config.setdefault("experiment", {}).setdefault("noise_frequency_grid", NOISE_FREQUENCY_GRID_VERSION)
     config["experiment"].setdefault("noise_construction_version", NOISE_CONSTRUCTION_VERSION)
+    # This marks runs whose adapter verified that every supplied initial noise
+    # tensor reached the pipeline's latent preparation entry point.
+    config["experiment"].setdefault("latent_injection_verification", LATENT_INJECTION_VERIFICATION_VERSION)
     # Paths in checked-in YAML are relative to the independent noise_init root,
     # not to the caller's shell directory or an adjacent DivGen checkout.
     cache_dir = config.get("model", {}).get("cache_dir")
@@ -63,6 +67,7 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     if config["experiment"]["gallery_size"] != 4: raise ValueError("This experiment contract requires gallery_size=4")
     if config["experiment"].get("noise_frequency_grid") != NOISE_FREQUENCY_GRID_VERSION: raise ValueError("Only DivGen integer FFT-bin frequency coordinates are supported")
     if config["experiment"].get("noise_construction_version") != NOISE_CONSTRUCTION_VERSION: raise ValueError("Unsupported noise construction version")
+    if config["experiment"].get("latent_injection_verification") != LATENT_INJECTION_VERIFICATION_VERSION: raise ValueError("Unsupported latent injection verification version")
     if config["experiment"]["normalization_profile"] not in {"per_sample_per_channel_zero_mean_unit_std", "divgen_compat", "none"}: raise ValueError("Invalid normalization profile")
     if config["model"]["adapter"] not in {"flux2_klein", "sdxl_turbo"}: raise ValueError("Only flux2_klein and sdxl_turbo adapters are supported")
     if config["diversity_metrics"]["vendi_clip"].get("enabled", False) and config["diversity_metrics"]["vendi_clip"]["embedding_checkpoint"] != config["quality_metrics"]["clip"]["checkpoint"]:
@@ -152,6 +157,9 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
             sample_dir.mkdir(parents=True, exist_ok=True)
             images = adapter.generate(block["prompt"], latents, generation_config)
             if len(images) != 4: raise RuntimeError(f"Adapter returned {len(images)} images; expected 4")
+            prepared_hashes = getattr(adapter, "last_generated_latent_hashes", None)
+            if prepared_hashes is not None and len(prepared_hashes) != len(images):
+                raise RuntimeError("Adapter returned incomplete initial-latent verification records")
             records = []
             for index, image in enumerate(images):
                 target = sample_dir / f"image_{index:02d}.png"; image.save(target, format="PNG")
@@ -160,6 +168,7 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
                                 "condition_id": condition.identifier, "alpha": condition.alpha, "gamma": condition.gamma,
                                 "normalization_profile": config["experiment"]["normalization_profile"], "base_noise_hash": batch.base_hashes[index],
                                 "eta_noise_hash": batch.eta_hashes[index], "final_noise_hash": tensor_hash(latents[index]),
+                                "adapter_prepared_latent_hash": None if prepared_hashes is None else prepared_hashes[index],
                                 "image_path": str(target.resolve()), "image_hash": file_hash(target), "generation_config_hash": _generation_hash(config)})
             _save_grid(images, sample_dir / "grid_1x4.png")
             write_jsonl(sample_dir / "samples.jsonl", records)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Protocol
 
 import torch
@@ -46,6 +47,8 @@ class _DiffusersAdapter:
         self.dtype = _torch_dtype(model_config["dtype"])
         self.pipe = None
         self.last_supplied_latent_hash: str | None = None
+        self.last_prepared_latent_hash: str | None = None
+        self.last_generated_latent_hashes: list[str] = []
 
     def _load(self):
         raise NotImplementedError
@@ -60,18 +63,44 @@ class _DiffusersAdapter:
             self._load()
         supplied = latent.detach().to(device=self.device, dtype=self.dtype).contiguous()
         self.last_supplied_latent_hash = _quick_tensor_hash(supplied)
-        # ``latents=`` is the public initial-noise entry point.  No generator is supplied,
-        # so a pipeline cannot substitute another random latent without violating this call.
-        with torch.inference_mode():
-            result = self.pipe(
-                prompt=prompt,
-                latents=supplied,
-                height=config.height,
-                width=config.width,
-                num_inference_steps=config.num_inference_steps,
-                guidance_scale=config.guidance_scale,
-                output_type="pil",
-            )
+        # ``latents=`` is the public initial-noise entry point.  Capture the
+        # tensor that the pipeline subsequently hands to ``prepare_latents``.
+        # This prevents an adapter/API mismatch from silently replacing every
+        # supplied condition with pipeline-generated noise.
+        original_prepare = getattr(self.pipe, "prepare_latents", None)
+        if original_prepare is None or not callable(original_prepare):
+            raise RuntimeError("Pipeline has no callable prepare_latents; cannot verify initial-noise injection")
+        signature = inspect.signature(original_prepare)
+        captured: dict[str, str | None] = {"hash": None}
+
+        def checked_prepare_latents(*args, **kwargs):
+            try:
+                received = signature.bind_partial(*args, **kwargs).arguments.get("latents")
+            except TypeError:
+                received = kwargs.get("latents")
+            if isinstance(received, torch.Tensor):
+                captured["hash"] = _quick_tensor_hash(received)
+            return original_prepare(*args, **kwargs)
+
+        self.pipe.prepare_latents = checked_prepare_latents
+        try:
+            with torch.inference_mode():
+                result = self.pipe(
+                    prompt=prompt,
+                    latents=supplied,
+                    height=config.height,
+                    width=config.width,
+                    num_inference_steps=config.num_inference_steps,
+                    guidance_scale=config.guidance_scale,
+                    output_type="pil",
+                )
+        finally:
+            self.pipe.prepare_latents = original_prepare
+        self.last_prepared_latent_hash = captured["hash"]
+        if self.last_prepared_latent_hash is None:
+            raise RuntimeError("Pipeline did not pass supplied latents to prepare_latents")
+        if self.last_prepared_latent_hash != self.last_supplied_latent_hash:
+            raise RuntimeError("Pipeline prepare_latents received noise different from the supplied initial latent")
         image = result.images[0]
         if not isinstance(image, Image.Image):
             raise TypeError("Pipeline did not return a PIL image")
@@ -82,7 +111,15 @@ class _DiffusersAdapter:
             raise ValueError("Adapters accept unpacked 4D initial latents only")
         # Sequential generation is intentional: it preserves base-index order and avoids
         # treating the gallery as a model batch requirement on a 24 GB GPU.
-        return [self._call_one(prompt, latents[index:index + 1], generation_config) for index in range(latents.shape[0])]
+        self.last_generated_latent_hashes = []
+        images = []
+        for index in range(latents.shape[0]):
+            images.append(self._call_one(prompt, latents[index:index + 1], generation_config))
+            # _call_one raises before returning when injection cannot be
+            # verified, so this record is always a verified pipeline input.
+            assert self.last_prepared_latent_hash is not None
+            self.last_generated_latent_hashes.append(self.last_prepared_latent_hash)
+        return images
 
 
 class Flux2KleinAdapter(_DiffusersAdapter):
