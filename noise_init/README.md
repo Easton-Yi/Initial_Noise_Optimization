@@ -101,6 +101,8 @@ optional_detail_curves:
 
 This produces only that requested detail under `analysis/optional_details/`; it does not alter the formal grid or omit any reported gamma from the tables.
 
+When re-running only `analyze` for an existing complete run, the CLI retains the run manifest's frozen bootstrap/statistical settings and records the current presentation choices in `analysis/analysis_manifest.json`. This permits a plotting-layout upgrade without regenerating images or metrics.
+
 ## Minimum formal run order
 
 ```bash

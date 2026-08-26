@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import yaml
 from PIL import Image
 
 from analysis import analyze_run
-from io_utils import alpha_token, condition_id, ensure_immutable_run, file_hash, read_jsonl, tensor_hash, write_json, write_jsonl
+from io_utils import alpha_token, condition_id, ensure_immutable_run, file_hash, read_json, read_jsonl, tensor_hash, write_json, write_jsonl
 from metric_runner import evaluate_run
 from model_adapters import GenerationConfig, T2IModelAdapter, build_adapter
 from noise_methods import construct_noise, load_or_create_noise_batch, noise_statistics
@@ -224,6 +225,35 @@ def _generation_hash(config: dict[str, Any]) -> str:
     return sha256_text(config["model"], config["generation"])
 
 
+def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str, Any]) -> dict[str, Any]:
+    """Use frozen statistical settings while permitting a newer figure layout.
+
+    Analysis is derived from immutable metrics, so it must not silently adopt a
+    new bootstrap policy.  Presentation-only options are safe to refresh and
+    are recorded separately; this lets old complete runs be replotted after a
+    plotting-code upgrade without regenerating images or metric values.
+    """
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError(f"No immutable run manifest found at {manifest_path}")
+    manifest = read_json(manifest_path)
+    frozen = manifest.get("resolved_config")
+    if not isinstance(frozen, dict) or not isinstance(frozen.get("analysis"), dict):
+        raise RuntimeError(f"Invalid resolved config in {manifest_path}")
+    config = copy.deepcopy(frozen)
+    presentation = requested_config["analysis"]
+    config["analysis"].update({
+        "primary_metric_pair": presentation["primary_metric_pair"],
+        "optional_detail_curves": presentation.get("optional_detail_curves", []),
+    })
+    write_json(run_dir / "analysis" / "analysis_manifest.json", {
+        "source_run_config_hash": manifest.get("config_hash"),
+        "frozen_statistical_analysis": frozen["analysis"],
+        "presentation_analysis": {"primary_metric_pair": config["analysis"]["primary_metric_pair"], "optional_detail_curves": config["analysis"]["optional_detail_curves"]},
+    })
+    return config
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True); parser.add_argument("--stage", required=True, choices=("validate", "generate", "metrics", "analyze", "all"))
@@ -237,10 +267,12 @@ def main() -> None:
     run_dir = _run_dir(config, config_path, args.run_id)
     if args.stage in ("generate", "all"):
         run_dir = generate(config, config_path, blocks, run_id=args.run_id, selected_conditions=args.conditions, force=args.force)
-    elif args.stage in ("metrics", "analyze"):
-        # Reject metrics/analysis for an existing run created by a different
-        # noise implementation, even when no generation is requested.
+    elif args.stage == "metrics":
+        # Metric values are scientific artefacts, so reject a run created by a
+        # different noise or metric configuration.
         ensure_immutable_run(run_dir, config, force=args.force)
+    elif args.stage == "analyze":
+        config = _analysis_config_for_existing_run(run_dir, config)
     if args.stage in ("metrics", "all"): evaluate_run(run_dir, config, force=args.force)
     if args.stage in ("analyze", "all"): analyze_run(run_dir, config)
 
