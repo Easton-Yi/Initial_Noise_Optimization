@@ -83,12 +83,15 @@ Do not use `--conditions` for this formal run: it is only for controlled smoke s
 
 `analyze` writes all statistics under `analysis/tables/`, including every curve point, per-gamma matched-diversity values, per-gamma mean matched-diversity gain, Pareto frontiers, paired effects, and bootstrap intervals. It does not default to one figure per gamma.
 
-With all six metric pairs enabled, it writes 13 PNG figures:
+With all six metric pairs enabled, it writes 19 PNG figures:
 
 - `analysis/primary/baseline_qd.png`: HPSv3 × DreamSim baseline alpha curve;
 - `analysis/primary/methods_qd_two_panel.png`: baseline plus nine same-phase curves on the left and baseline plus nine independent-white curves on the right; gamma colours run light-to-dark within each panel;
+- `analysis/primary/fixed_alpha_gamma_qd_two_panel.png`: diagnostic fixed-alpha Q–D paths, where each line connects gamma 0.1–0.9 at one alpha, with baseline retained for comparison;
 - `analysis/primary/matched_diversity_gain.png`: mean quality gain over the observed matched-diversity interval, by gamma, with paired-bootstrap CIs;
-- for each of the five remaining metric pairs, one two-panel Q–D robustness figure and one matched-diversity gain summary.
+- for each of the five remaining metric pairs, the same two Q–D diagnostics plus one matched-diversity gain summary.
+
+The fixed-alpha gamma sweep is a diagnostic view only. The formal Q–D comparison and matched-diversity inference remain the fixed-gamma alpha-sweep curves.
 
 The detailed 25-target matched-diversity values remain in `analysis/tables/matched_diversity.csv`; the gamma summary used in the figure is in `analysis/tables/matched_diversity_summary.csv`. To request an individual baseline-versus-one-gamma plot, add an explicit item to `analysis.optional_detail_curves`, for example:
 

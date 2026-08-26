@@ -206,12 +206,14 @@ def _plots(analysis_dir: Path, rows: list[dict[str, Any]], summaries: list[dict[
     if not any(row["curve_id"] != "baseline" for row in rows):
         return
     _plot_methods_two_panel(analysis_dir / "primary" / "methods_qd_two_panel.png", primary_rows, primary)
+    _plot_fixed_alpha_gamma_two_panel(analysis_dir / "primary" / "fixed_alpha_gamma_qd_two_panel.png", primary_rows, primary)
     _plot_matched_diversity_gain(analysis_dir / "primary" / "matched_diversity_gain.png", _pair_rows(summaries, primary))
     for pair in pairs:
         if pair == primary:
             continue
         target = analysis_dir / "robustness" / _pair_token(pair)
         _plot_methods_two_panel(target / "methods_qd_two_panel.png", _pair_rows(rows, pair), pair)
+        _plot_fixed_alpha_gamma_two_panel(target / "fixed_alpha_gamma_qd_two_panel.png", _pair_rows(rows, pair), pair)
         _plot_matched_diversity_gain(target / "matched_diversity_gain.png", _pair_rows(summaries, pair))
     for detail in config["analysis"].get("optional_detail_curves", []):
         if not isinstance(detail, dict) or "curve_id" not in detail:
@@ -312,6 +314,43 @@ def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tupl
     _plot_family_panel(axes[0], rows, "same_phase", pair)
     _plot_family_panel(axes[1], rows, "independent_white", pair)
     figure.suptitle(f"Q–D comparison: {_metric_label(pair[0])} × {_metric_label(pair[1])}")
+    _save_figure(figure, target)
+
+
+def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str]) -> None:
+    """Diagnostic Q-D paths obtained by holding alpha fixed and sweeping gamma."""
+    import matplotlib.pyplot as plt
+    _plot_baseline(axis, rows)
+    alphas = sorted({float(row["alpha"]) for row in rows if row["family"] == family})
+    cmap = plt.colormaps["viridis"]
+    for index, alpha in enumerate(alphas):
+        series = sorted([row for row in rows if row["family"] == family and float(row["alpha"]) == alpha], key=lambda row: float(row["gamma"]))
+        color = cmap(.12 + .78 * index / max(len(alphas) - 1, 1))
+        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"α={alpha:.1f}")
+    _style_qd_axis(axis, pair, "Same-phase: fixed α, γ sweep" if family == "same_phase" else "Independent-white: fixed α, γ sweep")
+    axis.legend(ncol=2, fontsize=8, frameon=False)
+    proposed = [row for row in rows if row["family"] == family]
+    if proposed:
+        inset = axis.inset_axes([.53, .08, .43, .34])
+        baseline = _series(rows, "baseline")
+        inset.plot([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", marker="o", markersize=2.8, linewidth=1.5, zorder=1)
+        for index, alpha in enumerate(alphas):
+            series = sorted([row for row in proposed if float(row["alpha"]) == alpha], key=lambda row: float(row["gamma"]))
+            color = cmap(.12 + .78 * index / max(len(alphas) - 1, 1))
+            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=2.5, linewidth=1.0, zorder=2)
+        inset.set_xlim(*_padded_limits([float(row["diversity"]) for row in proposed]))
+        inset.set_ylim(*_padded_limits([float(row["quality"]) for row in proposed]))
+        inset.set_title("Zoom: baseline + fixed-α sweeps", fontsize=7)
+        inset.tick_params(labelsize=6)
+        inset.grid(alpha=.2)
+
+
+def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
+    import matplotlib.pyplot as plt
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
+    _plot_fixed_alpha_family_panel(axes[0], rows, "same_phase", pair)
+    _plot_fixed_alpha_family_panel(axes[1], rows, "independent_white", pair)
+    figure.suptitle(f"Diagnostic fixed-α γ sweeps: {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 

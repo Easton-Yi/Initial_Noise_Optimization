@@ -499,10 +499,12 @@ outputs/<run_id>/
     primary/
       baseline_qd.png
       methods_qd_two_panel.png
+      fixed_alpha_gamma_qd_two_panel.png
       matched_diversity_gain.png
     robustness/
       <quality>__<diversity>/
         methods_qd_two_panel.png
+        fixed_alpha_gamma_qd_two_panel.png
         matched_diversity_gain.png
     optional_details/
     tables/
@@ -632,13 +634,14 @@ For each proposed condition relative to the simple-pink baseline at the same alp
 
 ### 13.1 Compact figure set
 
-Pre-register `HPSv3 × DreamSim` as the primary quality–diversity pair. The default primary output is exactly three figures:
+Pre-register `HPSv3 × DreamSim` as the primary quality–diversity pair. The default primary output is four figures:
 
 1. one labeled baseline Q–D alpha curve;
 2. one two-panel comparison, with baseline plus all nine same-phase gamma curves on the left and baseline plus all nine independent-white gamma curves on the right; use a continuous light-to-dark gamma colour scale within each panel;
-3. one matched-diversity gain summary versus gamma, with separate method lines and paired-bootstrap confidence intervals.
+3. one diagnostic two-panel fixed-alpha gamma sweep, where each line connects gamma `0.1,...,0.9` at one alpha and baseline remains visible for reference;
+4. one matched-diversity gain summary versus gamma, with separate method lines and paired-bootstrap confidence intervals.
 
-For every non-primary quality/diversity pair, render only the two-panel Q–D overview and the matched-diversity gain summary. Thus six enabled metric pairs produce 13 default PNG figures, not one figure per gamma. The complete 19 curves per pair and all raw points remain in machine-readable tables. Never select a gamma solely because it looks best; the complete gamma scan remains reported in the tables and summaries.
+For every metric pair, also render one diagnostic two-panel fixed-alpha gamma sweep: each line holds alpha fixed and connects gamma `0.1,...,0.9`; include the baseline curve in both panels for reference. This view is diagnostic only and must not replace the fixed-gamma alpha-sweep curves used for formal matched-diversity inference. Thus six enabled metric pairs produce 19 default PNG figures, not one figure per gamma. The complete 19 formal curves per pair and all raw points remain in machine-readable tables. Never select a gamma solely because it looks best; the complete gamma scan remains reported in the tables and summaries.
 
 Do not generate an individual baseline-plus-one-gamma figure unless it is explicitly listed in `analysis.optional_detail_curves` with a metric pair and `curve_id`. Optional details are diagnostic/supplementary artefacts, not a substitute for the compact registered figure set.
 
