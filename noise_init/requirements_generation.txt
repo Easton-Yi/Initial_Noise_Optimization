@@ -1,7 +1,9 @@
 # FLUX.2 generation and standard metric environment.
 
-torch==2.7.0
-torchvision==0.22.0
+# For Blackwell (e.g. RTX Pro 4000)
+torch==2.11.0
+torchvision==0.26.0
+
 diffusers==0.37.1
 transformers==4.56.2
 accelerate==1.10.1
