@@ -326,7 +326,7 @@ def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tupl
 def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str]) -> None:
     """Diagnostic Q-D paths obtained by holding alpha fixed and sweeping gamma."""
     import matplotlib.pyplot as plt
-    _plot_baseline(axis, rows)
+    _plot_baseline_alpha_points(axis, rows, annotate=True)
     alphas = sorted({float(row["alpha"]) for row in rows if row["family"] == family})
     cmap = plt.colormaps["viridis"]
     for index, alpha in enumerate(alphas):
@@ -339,7 +339,7 @@ def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str
     if proposed:
         inset = axis.inset_axes([.53, .08, .43, .34])
         baseline = _series(rows, "baseline")
-        inset.plot([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", marker="o", markersize=2.8, linewidth=1.5, zorder=1)
+        inset.scatter([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", s=14, zorder=1)
         for index, alpha in enumerate(alphas):
             series = sorted([row for row in proposed if float(row["alpha"]) == alpha], key=lambda row: float(row["gamma"]))
             color = cmap(.12 + .78 * index / max(len(alphas) - 1, 1))
@@ -349,6 +349,17 @@ def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str
         inset.set_title("Zoom: baseline + fixed-α sweeps", fontsize=7)
         inset.tick_params(labelsize=6)
         inset.grid(alpha=.2)
+
+
+def _plot_baseline_alpha_points(axis, rows: list[dict[str, Any]], *, annotate: bool) -> None:
+    """Show baseline as alpha-labelled reference points, not a gamma trajectory."""
+    baseline = _series(rows, "baseline")
+    if not baseline:
+        raise RuntimeError("A Q-D comparison requires baseline points")
+    axis.scatter([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", s=32, label="baseline α points", zorder=3)
+    if annotate:
+        for row in baseline:
+            axis.annotate(f"α={float(row['alpha']):.1f}", (row["diversity"], row["quality"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
 
 
 def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
