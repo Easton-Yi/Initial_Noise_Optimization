@@ -93,6 +93,8 @@ With all six metric pairs enabled, it writes 19 PNG figures:
 
 The fixed-alpha gamma sweep is a diagnostic view only. The formal Q–D comparison and matched-diversity inference remain the fixed-gamma alpha-sweep curves.
 
+For readability, both kinds of two-panel Q–D figure are presentation subsets: they show only `alpha=0.3,...,0.7`, and proposed-method lines only for `gamma=0.1,...,0.6`. This filter applies to the baseline reference in those panels as well. It does not remove any generated condition or any row from the analysis tables, Pareto calculations, matched-diversity calculations, or the standalone primary baseline curve.
+
 The detailed 25-target matched-diversity values remain in `analysis/tables/matched_diversity.csv`; the gamma summary used in the figure is in `analysis/tables/matched_diversity_summary.csv`. To request an individual baseline-versus-one-gamma plot, add an explicit item to `analysis.optional_detail_curves`, for example:
 
 ```yaml

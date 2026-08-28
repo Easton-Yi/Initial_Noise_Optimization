@@ -8,6 +8,11 @@ from typing import Any
 import numpy as np
 
 
+TWO_PANEL_ALPHA_MIN = 0.3
+TWO_PANEL_ALPHA_MAX = 0.7
+TWO_PANEL_GAMMA_MAX = 0.6
+
+
 def pareto_frontier(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep non-dominated points when both diversity and quality are maximized."""
     result = []
@@ -310,10 +315,11 @@ def _padded_limits(values: list[float]) -> tuple[float, float]:
 
 def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
     import matplotlib.pyplot as plt
+    rows = _two_panel_rows(rows)
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
     _plot_family_panel(axes[0], rows, "same_phase", pair)
     _plot_family_panel(axes[1], rows, "independent_white", pair)
-    figure.suptitle(f"Q–D comparison: {_metric_label(pair[0])} × {_metric_label(pair[1])}")
+    figure.suptitle(f"Q–D comparison (α={TWO_PANEL_ALPHA_MIN:.1f}–{TWO_PANEL_ALPHA_MAX:.1f}, γ≤{TWO_PANEL_GAMMA_MAX:.1f}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 
@@ -347,11 +353,27 @@ def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str
 
 def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
     import matplotlib.pyplot as plt
+    rows = _two_panel_rows(rows)
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
     _plot_fixed_alpha_family_panel(axes[0], rows, "same_phase", pair)
     _plot_fixed_alpha_family_panel(axes[1], rows, "independent_white", pair)
-    figure.suptitle(f"Diagnostic fixed-α γ sweeps: {_metric_label(pair[0])} × {_metric_label(pair[1])}")
+    figure.suptitle(f"Diagnostic fixed-α γ sweeps (α={TWO_PANEL_ALPHA_MIN:.1f}–{TWO_PANEL_ALPHA_MAX:.1f}, γ≤{TWO_PANEL_GAMMA_MAX:.1f}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
+
+
+def _two_panel_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Presentation-only subset for both Q-D two-panel figure families."""
+    selected = []
+    for row in rows:
+        alpha = float(row["alpha"])
+        if not TWO_PANEL_ALPHA_MIN <= alpha <= TWO_PANEL_ALPHA_MAX:
+            continue
+        if row["family"] != "baseline" and float(row["gamma"]) > TWO_PANEL_GAMMA_MAX:
+            continue
+        selected.append(row)
+    if not any(row["family"] == "baseline" for row in selected):
+        raise RuntimeError("Two-panel display subset contains no baseline points")
+    return selected
 
 
 def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> None:
