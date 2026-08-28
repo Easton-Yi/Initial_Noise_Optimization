@@ -92,10 +92,17 @@ class MetricRunner:
     def dreamsim_distance(self, a: Path, b: Path) -> float:
         if self._dreamsim is None:
             from dreamsim import dreamsim
-            self._dreamsim = dreamsim(pretrained=True, device=str(self.device))
+            self._dreamsim = dreamsim(
+                pretrained=True,
+                device=str(self.device)
+            )
+
         model, preprocess = self._dreamsim
+        image_a = preprocess(Image.open(a).convert("RGB")).to(self.device)
+        image_b = preprocess(Image.open(b).convert("RGB")).to(self.device)
+
         with torch.inference_mode():
-            return float(model(preprocess(Image.open(a).convert("RGB")).unsqueeze(0).to(self.device), preprocess(Image.open(b).convert("RGB")).unsqueeze(0).to(self.device)).item())
+            return float(model(image_a, image_b).item())
 
     def hpsv3(self, image_path: Path, prompt: str) -> float:
         """Use only the official HPSv3 package; never fall back to HPSv2."""
