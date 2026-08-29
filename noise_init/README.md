@@ -36,6 +36,31 @@ python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --ru
 
 Do not run `analyze` for this deliberately incomplete two-condition smoke run.
 
+## Noise validation
+
+For a completed run with cached base-white and independent-white tensors, run
+the post-hoc frequency validator before interpreting Q–D results:
+
+```bash
+python3 noise_validation.py --run-id flux2_full
+```
+
+This reconstructs every configured noise condition from the saved cache without
+sampling replacement noise, loading the diffusion model, or modifying generated
+images. It checks cache integrity, saved final-noise provenance where available,
+the same-phase frequency-domain identity, and empirical versus theoretical PSD
+shape. Results are written to:
+
+```text
+outputs/flux2_full/analysis/frequency_validation/
+```
+
+The directory contains `noise_frequency_summary.csv`, selected radial-PSD and
+theory-versus-empirical plots, plus equivalent-baseline-alpha and base-noise
+coherence heatmaps. Hashes may differ across FFT library builds; use the
+recorded numeric consistency checks rather than hash equality alone in that
+case.
+
 ## Optional FLUX.2 Klein baseline pilot: white through pink 0.7
 
 `configs/flux2_klein.yaml` selects the primary model, **FLUX.2 Klein 4B, BF16, 1024×1024, four inference steps**, and enables all eight matched baseline conditions:
