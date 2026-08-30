@@ -17,6 +17,8 @@ logs
 *.pt
 *.pth
 *.safetensors
+*.tar
+*.tar.gz
 
 # Local credentials and editor state
 .env
