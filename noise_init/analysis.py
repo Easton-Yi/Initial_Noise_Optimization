@@ -8,11 +8,6 @@ from typing import Any
 import numpy as np
 
 
-TWO_PANEL_ALPHA_MIN = 0.3
-TWO_PANEL_ALPHA_MAX = 0.7
-TWO_PANEL_GAMMA_MAX = 0.6
-
-
 def pareto_frontier(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep non-dominated points when both diversity and quality are maximized."""
     result = []
@@ -206,19 +201,20 @@ def _plots(analysis_dir: Path, rows: list[dict[str, Any]], summaries: list[dict[
     primary = (requested.get("quality", "hpsv3"), requested.get("diversity", "dreamsim_mean_pair_distance"))
     if primary not in pairs:
         raise RuntimeError(f"Configured primary metric pair has no complete results: {primary}")
+    display = _two_panel_display(config)
     primary_rows = _pair_rows(rows, primary)
     _plot_baseline_qd(analysis_dir / "primary" / "baseline_qd.png", primary_rows, primary)
     if not any(row["curve_id"] != "baseline" for row in rows):
         return
-    _plot_methods_two_panel(analysis_dir / "primary" / "methods_qd_two_panel.png", primary_rows, primary)
-    _plot_fixed_alpha_gamma_two_panel(analysis_dir / "primary" / "fixed_alpha_gamma_qd_two_panel.png", primary_rows, primary)
+    _plot_methods_two_panel(analysis_dir / "primary" / "methods_qd_two_panel.png", primary_rows, primary, display)
+    _plot_fixed_alpha_gamma_two_panel(analysis_dir / "primary" / "fixed_alpha_gamma_qd_two_panel.png", primary_rows, primary, display)
     _plot_matched_diversity_gain(analysis_dir / "primary" / "matched_diversity_gain.png", _pair_rows(summaries, primary))
     for pair in pairs:
         if pair == primary:
             continue
         target = analysis_dir / "robustness" / _pair_token(pair)
-        _plot_methods_two_panel(target / "methods_qd_two_panel.png", _pair_rows(rows, pair), pair)
-        _plot_fixed_alpha_gamma_two_panel(target / "fixed_alpha_gamma_qd_two_panel.png", _pair_rows(rows, pair), pair)
+        _plot_methods_two_panel(target / "methods_qd_two_panel.png", _pair_rows(rows, pair), pair, display)
+        _plot_fixed_alpha_gamma_two_panel(target / "fixed_alpha_gamma_qd_two_panel.png", _pair_rows(rows, pair), pair, display)
         _plot_matched_diversity_gain(target / "matched_diversity_gain.png", _pair_rows(summaries, pair))
     for detail in config["analysis"].get("optional_detail_curves", []):
         if not isinstance(detail, dict) or "curve_id" not in detail:
@@ -313,13 +309,13 @@ def _padded_limits(values: list[float]) -> tuple[float, float]:
     return lower - padding, upper + padding
 
 
-def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
+def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
     import matplotlib.pyplot as plt
-    rows = _two_panel_rows(rows)
+    rows = _two_panel_rows(rows, display)
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
     _plot_family_panel(axes[0], rows, "same_phase", pair)
     _plot_family_panel(axes[1], rows, "independent_white", pair)
-    figure.suptitle(f"Q–D comparison (α={TWO_PANEL_ALPHA_MIN:.1f}–{TWO_PANEL_ALPHA_MAX:.1f}, γ≤{TWO_PANEL_GAMMA_MAX:.1f}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
+    figure.suptitle(f"Q–D comparison ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 
@@ -362,24 +358,36 @@ def _plot_baseline_alpha_points(axis, rows: list[dict[str, Any]], *, annotate: b
             axis.annotate(f"α={float(row['alpha']):.1f}", (row["diversity"], row["quality"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
 
 
-def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str]) -> None:
+def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
     import matplotlib.pyplot as plt
-    rows = _two_panel_rows(rows)
+    rows = _two_panel_rows(rows, display)
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
     _plot_fixed_alpha_family_panel(axes[0], rows, "same_phase", pair)
     _plot_fixed_alpha_family_panel(axes[1], rows, "independent_white", pair)
-    figure.suptitle(f"Diagnostic fixed-α γ sweeps (α={TWO_PANEL_ALPHA_MIN:.1f}–{TWO_PANEL_ALPHA_MAX:.1f}, γ≤{TWO_PANEL_GAMMA_MAX:.1f}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
+    figure.suptitle(f"Diagnostic fixed-α γ sweeps ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 
-def _two_panel_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Presentation-only subset for both Q-D two-panel figure families."""
+def _two_panel_display(config: dict[str, Any]) -> dict[str, tuple[float, ...]]:
+    section = config["analysis"]["two_panel_display"]
+    return {"alpha_values": tuple(float(value) for value in section["alpha_values"]),
+            "gamma_values": tuple(float(value) for value in section["gamma_values"])}
+
+
+def _display_title_fragment(display: dict[str, tuple[float, ...]]) -> str:
+    def endpoint(values: tuple[float, ...]) -> str:
+        return f"{min(values):g}" if len(values) == 1 else f"{min(values):g}–{max(values):g}"
+    return f"α={endpoint(display['alpha_values'])}, γ={endpoint(display['gamma_values'])}"
+
+
+def _two_panel_rows(rows: list[dict[str, Any]], display: dict[str, tuple[float, ...]]) -> list[dict[str, Any]]:
+    """YAML-selected presentation subset for both Q-D two-panel figure families."""
     selected = []
     for row in rows:
         alpha = float(row["alpha"])
-        if not TWO_PANEL_ALPHA_MIN <= alpha <= TWO_PANEL_ALPHA_MAX:
+        if not any(np.isclose(alpha, allowed) for allowed in display["alpha_values"]):
             continue
-        if row["family"] != "baseline" and float(row["gamma"]) > TWO_PANEL_GAMMA_MAX:
+        if row["family"] != "baseline" and not any(np.isclose(float(row["gamma"]), allowed) for allowed in display["gamma_values"]):
             continue
         selected.append(row)
     if not any(row["family"] == "baseline" for row in selected):

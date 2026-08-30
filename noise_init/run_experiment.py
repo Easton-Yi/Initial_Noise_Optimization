@@ -75,6 +75,11 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     if primary_pair["quality"] not in {"hpsv3", "clip_cosine"} or primary_pair["diversity"] not in {"dreamsim_mean_pair_distance", "lpips_alex_mean_pair_distance", "vendi_clip"}:
         raise ValueError("analysis.primary_metric_pair contains an unknown metric name")
     if not isinstance(config["analysis"].get("optional_detail_curves", []), list): raise ValueError("analysis.optional_detail_curves must be a list")
+    two_panel = config["analysis"].get("two_panel_display")
+    if not isinstance(two_panel, dict) or set(two_panel) != {"alpha_values", "gamma_values"}:
+        raise ValueError("analysis.two_panel_display must contain alpha_values and gamma_values")
+    if not two_panel["alpha_values"] or not two_panel["gamma_values"] or not all(isinstance(value, (int, float)) for value in two_panel["alpha_values"]) or not all(isinstance(value, (int, float)) for value in two_panel["gamma_values"]):
+        raise ValueError("analysis.two_panel_display values must be numeric")
     if config["model"]["adapter"] not in {"flux2_klein", "sdxl_turbo"}: raise ValueError("Only flux2_klein and sdxl_turbo adapters are supported")
     if config["diversity_metrics"]["vendi_clip"].get("enabled", False) and config["diversity_metrics"]["vendi_clip"]["embedding_checkpoint"] != config["quality_metrics"]["clip"]["checkpoint"]:
         raise ValueError("This compact runner uses one frozen CLIP encoder; vendi_clip.embedding_checkpoint must equal quality_metrics.clip.checkpoint")
@@ -90,6 +95,12 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
             if not 0 <= float(gamma) <= 1: raise ValueError(f"{name}: gamma must be in [0, 1]")
         if name != "baseline" and section.get("enabled", False) and any(float(gamma) in (0.0, 1.0) for gamma in section.get("gamma_values", [])):
             raise ValueError(f"{name}: gamma=0 and gamma=1 are tensor-test endpoints, not formal generation conditions")
+    for name in ("same_phase_floor", "independent_white"):
+        section = config[name]
+        if not set(map(float, two_panel["alpha_values"])).issubset(set(map(float, section["alpha_values"]))):
+            raise ValueError(f"analysis.two_panel_display alpha_values must be present in {name}.alpha_values")
+        if not set(map(float, two_panel["gamma_values"])).issubset(set(map(float, section["gamma_values"]))):
+            raise ValueError(f"analysis.two_panel_display gamma_values must be present in {name}.gamma_values")
     manifest = (config_path.parent.parent / config["blocks"]["manifest"]).resolve()
     blocks = read_jsonl(manifest)
     if not blocks: raise ValueError(f"Block manifest is empty: {manifest}")
@@ -245,11 +256,12 @@ def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str,
     config["analysis"].update({
         "primary_metric_pair": presentation["primary_metric_pair"],
         "optional_detail_curves": presentation.get("optional_detail_curves", []),
+        "two_panel_display": presentation["two_panel_display"],
     })
     write_json(run_dir / "analysis" / "analysis_manifest.json", {
         "source_run_config_hash": manifest.get("config_hash"),
         "frozen_statistical_analysis": frozen["analysis"],
-        "presentation_analysis": {"primary_metric_pair": config["analysis"]["primary_metric_pair"], "optional_detail_curves": config["analysis"]["optional_detail_curves"]},
+        "presentation_analysis": {"primary_metric_pair": config["analysis"]["primary_metric_pair"], "optional_detail_curves": config["analysis"]["optional_detail_curves"], "two_panel_display": config["analysis"]["two_panel_display"]},
     })
     return config
 

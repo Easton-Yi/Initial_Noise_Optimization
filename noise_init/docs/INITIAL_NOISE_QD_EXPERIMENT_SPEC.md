@@ -429,6 +429,9 @@ analysis:
     quality: hpsv3
     diversity: dreamsim_mean_pair_distance
   optional_detail_curves: []
+  two_panel_display:
+    alpha_values: [0.3, 0.4, 0.5, 0.6, 0.7]
+    gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 ```
 
 All configuration values must be copied into an immutable run manifest before generation starts.
@@ -643,7 +646,7 @@ Pre-register `HPSv3 × DreamSim` as the primary quality–diversity pair. The de
 
 For every metric pair, also render one diagnostic two-panel fixed-alpha gamma sweep: each line holds alpha fixed and connects the displayed gamma values; include the baseline curve in both panels for reference. This view is diagnostic only and must not replace the fixed-gamma alpha-sweep curves used for formal matched-diversity inference. Thus six enabled metric pairs produce 19 default PNG figures, not one figure per gamma. The complete 19 formal curves per pair and all raw points remain in machine-readable tables. Never select a gamma solely because it looks best; the complete gamma scan remains reported in the tables and summaries.
 
-For readable two-panel figures, use the presentation subset `alpha=0.3,...,0.7`; display proposed-method curves only for `gamma=0.1,...,0.6`, with the baseline restricted to the same alpha range. This is a visual filter only: the complete alpha/gamma grid remains in all CSV outputs, Pareto/frontier computation, matched-diversity inference, and the standalone primary baseline figure.
+For readable two-panel figures, use the YAML-configured `analysis.two_panel_display` alpha and gamma lists; the generated title must state their alpha and gamma endpoints. Restrict the baseline to the same displayed alpha values. This is a visual filter only: the complete alpha/gamma grid remains in all CSV outputs, Pareto/frontier computation, matched-diversity inference, and the standalone primary baseline figure.
 
 Do not generate an individual baseline-plus-one-gamma figure unless it is explicitly listed in `analysis.optional_detail_curves` with a metric pair and `curve_id`. Optional details are diagnostic/supplementary artefacts, not a substitute for the compact registered figure set.
 
