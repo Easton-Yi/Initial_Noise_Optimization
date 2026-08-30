@@ -225,7 +225,7 @@ def _generation_hash(config: dict[str, Any]) -> str:
     return sha256_text(config["model"], config["generation"])
 
 
-def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str, Any]) -> dict[str, Any]:
+def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str, Any], alpha_range: str, gamma_range: str) -> dict[str, Any]:
     """Use frozen statistical settings while permitting a newer figure layout.
 
     Analysis is derived from immutable metrics, so it must not silently adopt a
@@ -245,8 +245,13 @@ def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str,
     config["analysis"].update({
         "primary_metric_pair": presentation["primary_metric_pair"],
         "optional_detail_curves": presentation.get("optional_detail_curves", []),
-        "two_panel_display": presentation["two_panel_display"],
     })
+    # The display range must come from this run's frozen generation grid, not
+    # whatever the --config file currently contains: the YAML can be edited
+    # (a new grid, a different variant file) after the run was generated, and
+    # validating against it would silently select alpha/gamma values this run
+    # never actually produced.
+    _select_two_panel_display(config, alpha_range, gamma_range)
     write_json(run_dir / "analysis" / "analysis_manifest.json", {
         "source_run_config_hash": manifest.get("config_hash"),
         "frozen_statistical_analysis": frozen["analysis"],
@@ -270,7 +275,10 @@ def _select_two_panel_display(config: dict[str, Any], alpha_range: str, gamma_ra
     """Select the inclusive two-panel display subset from the YAML experiment grid."""
     alpha_lower, alpha_upper = _parse_plot_range(alpha_range, "--plot-alpha-range")
     gamma_lower, gamma_upper = _parse_plot_range(gamma_range, "--plot-gamma-range")
-    alpha_grids = [set(map(float, config[name]["alpha_values"])) for name in ("baseline", "same_phase_floor", "independent_white")]
+    # Baseline is always drawn in full in the two-panel plots (see
+    # _two_panel_rows), so its alpha grid must not gate which alpha values the
+    # proposed-family curves can display.
+    alpha_grids = [set(map(float, config[name]["alpha_values"])) for name in ("same_phase_floor", "independent_white")]
     gamma_grids = [set(map(float, config[name]["gamma_values"])) for name in ("same_phase_floor", "independent_white")]
     available_alpha = sorted(set.intersection(*alpha_grids))
     available_gamma = sorted(set.intersection(*gamma_grids))
@@ -295,10 +303,16 @@ def main() -> None:
     if args.stage in ("analyze", "all"):
         if args.plot_alpha_range is None or args.plot_gamma_range is None:
             parser.error("--stage analyze/all requires both --plot-alpha-range MIN:MAX and --plot-gamma-range MIN:MAX")
-        try:
-            _select_two_panel_display(config, args.plot_alpha_range, args.plot_gamma_range)
-        except ValueError as error:
-            parser.error(str(error))
+        if args.stage == "all":
+            # Stage "all" generates data with this exact config in the same
+            # invocation, so its grid is authoritative here; validate eagerly
+            # to fail fast before spending time on generation. Stage "analyze"
+            # instead validates against the run's frozen grid, further below,
+            # once that frozen config has been loaded.
+            try:
+                _select_two_panel_display(config, args.plot_alpha_range, args.plot_gamma_range)
+            except ValueError as error:
+                parser.error(str(error))
     elif args.plot_alpha_range is not None or args.plot_gamma_range is not None:
         parser.error("--plot-alpha-range and --plot-gamma-range are valid only with --stage analyze or --stage all")
     if args.prompt is not None:
@@ -314,7 +328,10 @@ def main() -> None:
         # different noise or metric configuration.
         ensure_immutable_run(run_dir, config, force=args.force)
     elif args.stage == "analyze":
-        config = _analysis_config_for_existing_run(run_dir, config)
+        try:
+            config = _analysis_config_for_existing_run(run_dir, config, args.plot_alpha_range, args.plot_gamma_range)
+        except ValueError as error:
+            parser.error(str(error))
     if args.stage in ("metrics", "all"): evaluate_run(run_dir, config, force=args.force)
     if args.stage in ("analyze", "all"): analyze_run(run_dir, config)
 

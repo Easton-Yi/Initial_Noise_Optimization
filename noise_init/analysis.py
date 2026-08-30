@@ -278,7 +278,7 @@ def _plot_baseline_qd(target: Path, rows: list[dict[str, Any]], pair: tuple[str,
     _save_figure(figure, target)
 
 
-def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str]) -> None:
+def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str], *, legend: bool = True) -> None:
     import matplotlib.pyplot as plt
     _plot_baseline(axis, rows)
     cmap = plt.colormaps["Blues" if family == "same_phase" else "Oranges"]
@@ -291,13 +291,15 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
         color = _gamma_colour(cmap, gamma, gamma_values)
         axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"γ={_format_grid_value(gamma)}")
     _style_qd_axis(axis, pair, "Same-phase" if family == "same_phase" else "Independent-white")
-    axis.legend(ncol=2, fontsize=8, frameon=False)
+    if legend:
+        axis.legend(loc="lower left", bbox_to_anchor=(1.02, 0.), fontsize=7.5, frameon=False)
     # The baseline can span much more of the Q-D plane than the proposed
     # sweeps.  Retain that global context, but also show the eight alpha points
-    # of every fixed-gamma curve at a readable scale.
+    # of every fixed-gamma curve at a readable scale.  Anchored bottom-left,
+    # since the curves themselves tend to cluster toward the upper-right.
     proposed = [row for row in rows if row["family"] == family]
     if proposed:
-        inset = axis.inset_axes([.53, .08, .43, .34])
+        inset = axis.inset_axes([.04, .08, .43, .34])
         baseline = _series(rows, "baseline")
         inset.plot([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", marker="o", markersize=2.8, linewidth=1.5, zorder=1)
         for curve_id in curve_ids:
@@ -329,14 +331,14 @@ def _padded_limits(values: list[float]) -> tuple[float, float]:
 def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
     import matplotlib.pyplot as plt
     rows = _two_panel_rows(rows, display)
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
+    figure, axes = plt.subplots(1, 2, figsize=(13.5, 4.5), sharex=False, sharey=False, constrained_layout=True)
     _plot_family_panel(axes[0], rows, "same_phase", pair)
     _plot_family_panel(axes[1], rows, "independent_white", pair)
     figure.suptitle(f"Q–D comparison ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 
-def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str]) -> None:
+def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str], *, legend: bool = True) -> None:
     """Diagnostic Q-D paths obtained by holding alpha fixed and sweeping gamma."""
     import matplotlib.pyplot as plt
     _plot_baseline_alpha_points(axis, rows, annotate=True)
@@ -347,10 +349,11 @@ def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str
         color = cmap(.12 + .78 * index / max(len(alphas) - 1, 1))
         axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"α={_format_grid_value(alpha)}")
     _style_qd_axis(axis, pair, "Same-phase: fixed α, γ sweep" if family == "same_phase" else "Independent-white: fixed α, γ sweep")
-    axis.legend(ncol=2, fontsize=8, frameon=False)
+    if legend:
+        axis.legend(loc="lower left", bbox_to_anchor=(1.02, 0.), fontsize=7.5, frameon=False)
     proposed = [row for row in rows if row["family"] == family]
     if proposed:
-        inset = axis.inset_axes([.53, .08, .43, .34])
+        inset = axis.inset_axes([.04, .08, .43, .34])
         baseline = _series(rows, "baseline")
         inset.scatter([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", s=14, zorder=1)
         for index, alpha in enumerate(alphas):
@@ -378,7 +381,7 @@ def _plot_baseline_alpha_points(axis, rows: list[dict[str, Any]], *, annotate: b
 def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
     import matplotlib.pyplot as plt
     rows = _two_panel_rows(rows, display)
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=False, sharey=False)
+    figure, axes = plt.subplots(1, 2, figsize=(13.5, 4.5), sharex=False, sharey=False, constrained_layout=True)
     _plot_fixed_alpha_family_panel(axes[0], rows, "same_phase", pair)
     _plot_fixed_alpha_family_panel(axes[1], rows, "independent_white", pair)
     figure.suptitle(f"Diagnostic fixed-α γ sweeps ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
