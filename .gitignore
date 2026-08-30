@@ -17,6 +17,9 @@ logs
 *.pt
 *.pth
 *.safetensors
+
+# Archived files
+backups/
 *.tar
 *.tar.gz
 
