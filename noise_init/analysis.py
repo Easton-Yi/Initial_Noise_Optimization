@@ -369,7 +369,9 @@ def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], 
 
 
 def _two_panel_display(config: dict[str, Any]) -> dict[str, tuple[float, ...]]:
-    section = config["analysis"]["two_panel_display"]
+    section = config["analysis"].get("two_panel_display")
+    if not isinstance(section, dict) or not section.get("alpha_values") or not section.get("gamma_values"):
+        raise RuntimeError("Two-panel plotting requires explicit --plot-alpha-range and --plot-gamma-range")
     return {"alpha_values": tuple(float(value) for value in section["alpha_values"]),
             "gamma_values": tuple(float(value) for value in section["gamma_values"])}
 

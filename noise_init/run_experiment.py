@@ -75,11 +75,6 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     if primary_pair["quality"] not in {"hpsv3", "clip_cosine"} or primary_pair["diversity"] not in {"dreamsim_mean_pair_distance", "lpips_alex_mean_pair_distance", "vendi_clip"}:
         raise ValueError("analysis.primary_metric_pair contains an unknown metric name")
     if not isinstance(config["analysis"].get("optional_detail_curves", []), list): raise ValueError("analysis.optional_detail_curves must be a list")
-    two_panel = config["analysis"].get("two_panel_display")
-    if not isinstance(two_panel, dict) or set(two_panel) != {"alpha_values", "gamma_values"}:
-        raise ValueError("analysis.two_panel_display must contain alpha_values and gamma_values")
-    if not two_panel["alpha_values"] or not two_panel["gamma_values"] or not all(isinstance(value, (int, float)) for value in two_panel["alpha_values"]) or not all(isinstance(value, (int, float)) for value in two_panel["gamma_values"]):
-        raise ValueError("analysis.two_panel_display values must be numeric")
     if config["model"]["adapter"] not in {"flux2_klein", "sdxl_turbo"}: raise ValueError("Only flux2_klein and sdxl_turbo adapters are supported")
     if config["diversity_metrics"]["vendi_clip"].get("enabled", False) and config["diversity_metrics"]["vendi_clip"]["embedding_checkpoint"] != config["quality_metrics"]["clip"]["checkpoint"]:
         raise ValueError("This compact runner uses one frozen CLIP encoder; vendi_clip.embedding_checkpoint must equal quality_metrics.clip.checkpoint")
@@ -95,12 +90,6 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
             if not 0 <= float(gamma) <= 1: raise ValueError(f"{name}: gamma must be in [0, 1]")
         if name != "baseline" and section.get("enabled", False) and any(float(gamma) in (0.0, 1.0) for gamma in section.get("gamma_values", [])):
             raise ValueError(f"{name}: gamma=0 and gamma=1 are tensor-test endpoints, not formal generation conditions")
-    for name in ("same_phase_floor", "independent_white"):
-        section = config[name]
-        if not set(map(float, two_panel["alpha_values"])).issubset(set(map(float, section["alpha_values"]))):
-            raise ValueError(f"analysis.two_panel_display alpha_values must be present in {name}.alpha_values")
-        if not set(map(float, two_panel["gamma_values"])).issubset(set(map(float, section["gamma_values"]))):
-            raise ValueError(f"analysis.two_panel_display gamma_values must be present in {name}.gamma_values")
     manifest = (config_path.parent.parent / config["blocks"]["manifest"]).resolve()
     blocks = read_jsonl(manifest)
     if not blocks: raise ValueError(f"Block manifest is empty: {manifest}")
@@ -266,11 +255,52 @@ def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str,
     return config
 
 
+def _parse_plot_range(value: str, flag: str) -> tuple[float, float]:
+    try:
+        lower_text, upper_text = value.split(":", 1)
+        lower, upper = float(lower_text), float(upper_text)
+    except ValueError as error:
+        raise ValueError(f"{flag} must use MIN:MAX, for example 0.3:0.9") from error
+    if lower > upper:
+        raise ValueError(f"{flag} minimum must not exceed its maximum")
+    return lower, upper
+
+
+def _select_two_panel_display(config: dict[str, Any], alpha_range: str, gamma_range: str) -> None:
+    """Select the inclusive two-panel display subset from the YAML experiment grid."""
+    alpha_lower, alpha_upper = _parse_plot_range(alpha_range, "--plot-alpha-range")
+    gamma_lower, gamma_upper = _parse_plot_range(gamma_range, "--plot-gamma-range")
+    alpha_grids = [set(map(float, config[name]["alpha_values"])) for name in ("baseline", "same_phase_floor", "independent_white")]
+    gamma_grids = [set(map(float, config[name]["gamma_values"])) for name in ("same_phase_floor", "independent_white")]
+    available_alpha = sorted(set.intersection(*alpha_grids))
+    available_gamma = sorted(set.intersection(*gamma_grids))
+    selected_alpha = [value for value in available_alpha if alpha_lower <= value <= alpha_upper]
+    selected_gamma = [value for value in available_gamma if gamma_lower <= value <= gamma_upper]
+    if not selected_alpha:
+        raise ValueError(f"--plot-alpha-range={alpha_range} selects no common alpha values from the YAML grids: {available_alpha}")
+    if not selected_gamma:
+        raise ValueError(f"--plot-gamma-range={gamma_range} selects no common gamma values from the YAML grids: {available_gamma}")
+    # Deliberately runtime-only: these presentation values are never defaults
+    # in a checked-in YAML configuration.
+    config["analysis"]["two_panel_display"] = {"alpha_values": selected_alpha, "gamma_values": selected_gamma}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True); parser.add_argument("--stage", required=True, choices=("validate", "generate", "metrics", "analyze", "all"))
     parser.add_argument("--run-id"); parser.add_argument("--prompt"); parser.add_argument("--batch-seed", type=int); parser.add_argument("--conditions"); parser.add_argument("--force", action="store_true")
+    parser.add_argument("--plot-alpha-range", metavar="MIN:MAX", help="Required for analyze/all: inclusive alpha range selected from the YAML grid")
+    parser.add_argument("--plot-gamma-range", metavar="MIN:MAX", help="Required for analyze/all: inclusive gamma range selected from the YAML grid")
     args = parser.parse_args(); config_path = Path(args.config).resolve(); config = load_config(config_path); blocks = validate_config(config, config_path)
+    if args.stage in ("analyze", "all"):
+        if args.plot_alpha_range is None or args.plot_gamma_range is None:
+            parser.error("--stage analyze/all requires both --plot-alpha-range MIN:MAX and --plot-gamma-range MIN:MAX")
+        try:
+            _select_two_panel_display(config, args.plot_alpha_range, args.plot_gamma_range)
+        except ValueError as error:
+            parser.error(str(error))
+    elif args.plot_alpha_range is not None or args.plot_gamma_range is not None:
+        parser.error("--plot-alpha-range and --plot-gamma-range are valid only with --stage analyze or --stage all")
     if args.prompt is not None:
         if args.batch_seed is None: parser.error("--prompt requires --batch-seed")
         blocks = [{"block_id": f"smoke_{args.batch_seed}", "prompt_id": "smoke", "prompt": args.prompt, "seed_batch_id": "smoke", "batch_seed": args.batch_seed}]

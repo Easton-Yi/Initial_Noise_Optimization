@@ -429,9 +429,6 @@ analysis:
     quality: hpsv3
     diversity: dreamsim_mean_pair_distance
   optional_detail_curves: []
-  two_panel_display:
-    alpha_values: [0.3, 0.4, 0.5, 0.6, 0.7]
-    gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 ```
 
 All configuration values must be copied into an immutable run manifest before generation starts.
@@ -444,8 +441,8 @@ Use one entry point with explicit stages; exact argument style may follow the ex
 python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage validate
 python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage generate
 python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage metrics
-python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage analyze
-python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage all
+python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage analyze --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6
+python noise_init/run_experiment.py --config noise_init/configs/flux2_klein.yaml --stage all --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6
 ```
 
 Also support a one-prompt smoke test:
@@ -646,7 +643,7 @@ Pre-register `HPSv3 × DreamSim` as the primary quality–diversity pair. The de
 
 For every metric pair, also render one diagnostic two-panel fixed-alpha gamma sweep: each line holds alpha fixed and connects the displayed gamma values; include the baseline curve in both panels for reference. This view is diagnostic only and must not replace the fixed-gamma alpha-sweep curves used for formal matched-diversity inference. Thus six enabled metric pairs produce 19 default PNG figures, not one figure per gamma. The complete 19 formal curves per pair and all raw points remain in machine-readable tables. Never select a gamma solely because it looks best; the complete gamma scan remains reported in the tables and summaries.
 
-For readable two-panel figures, use the YAML-configured `analysis.two_panel_display` alpha and gamma lists; the generated title must state their alpha and gamma endpoints. Restrict the baseline to the same displayed alpha values. This is a visual filter only: the complete alpha/gamma grid remains in all CSV outputs, Pareto/frontier computation, matched-diversity inference, and the standalone primary baseline figure.
+For readable two-panel figures, require `--plot-alpha-range MIN:MAX` and `--plot-gamma-range MIN:MAX` for `analyze` and `all`; there are no default display ranges. Select the inclusive subset only from the alpha/gamma values already listed in the YAML experiment grid, state the selected endpoints in the title, and restrict the baseline to the same selected alpha values. This is a visual filter only: the complete alpha/gamma grid remains in all CSV outputs, Pareto/frontier computation, matched-diversity inference, and the standalone primary baseline figure.
 
 Do not generate an individual baseline-plus-one-gamma figure unless it is explicitly listed in `analysis.optional_detail_curves` with a metric pair and `curve_id`. Optional details are diagnostic/supplementary artefacts, not a substitute for the compact registered figure set.
 
