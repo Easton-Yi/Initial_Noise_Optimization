@@ -30,8 +30,8 @@ These checks are recommended in a new environment but are not part of the formal
 python3 -m unittest discover -s tests -v
 
 # One-prompt smoke test: eight PNGs and two 1×4 grids
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --prompt "A photo of a red fox in snow" --batch-seed 10000 --conditions white,pink:0.5 --run-id flux_smoke
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux_smoke
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --prompt "A photo of a red fox in snow" --batch-seed 10000 --conditions white,pink:0.5 --run-id flux_smoke 2>&1 | tee logs/flux_smoke_generate.log
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux_smoke 2>&1 | tee logs/flux_smoke_metrics.log
 ```
 
 Do not run `analyze` for this deliberately incomplete two-condition smoke run.
@@ -74,9 +74,9 @@ white (= alpha 0.0), pink alpha = 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7
 For an optional small baseline pilot, use the explicit pilot run ID:
 
 ```bash
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --run-id flux2_baseline_pilot
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux2_baseline_pilot
-python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_pilot --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage generate --run-id flux2_baseline_pilot 2>&1 | tee logs/flux2_baseline_pilot_generate.log
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage metrics --run-id flux2_baseline_pilot 2>&1 | tee logs/flux2_baseline_pilot_metrics.log
+python3 run_experiment.py --config configs/flux2_klein.yaml --stage analyze --run-id flux2_baseline_pilot --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6 2>&1 | tee logs/flux2_baseline_pilot_analyze.log
 ```
 
 These commands run the complete white-to-pink-0.7 alpha sweep because they omit `--conditions`. The proposed-method experiment is a full alpha sweep at every intermediate gamma, not an anchor-alpha sweep. Do not run this baseline-only configuration over the full formal manifest as a required pre-step: the full experiment below already generates its matched formal baseline once.
@@ -91,9 +91,9 @@ Then run the **entire** final grid—one shared eight-point baseline curve, nine
 
 ```bash
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage validate
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full 2>&1 | tee logs/flux2_full_generate.log
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full 2>&1 | tee logs/flux2_full_metrics.log
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6 2>&1 | tee logs/flux2_full_analyze.log
 ```
 
 For **each quality–diversity metric pair**, this produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. All curve points, frontiers, matched-diversity values, and bootstrap results are retained in machine-readable tables. Default figures are deliberately compact: HPSv3 × DreamSim is the pre-registered primary pair, while the other pairs are robustness checks. `gamma=0` is represented by the shared baseline curve. At `gamma=1`, same-phase is exactly the baseline's cached base-white `epsilon` point, while independent-white is its cached independent `eta` point: it belongs to the same white-noise distribution but finite-sample metrics need not equal the baseline white point. Both are endpoint tensor tests only. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries.
@@ -122,11 +122,12 @@ Both kinds of two-panel Q–D figure require explicit CLI ranges when `analyze` 
 
 ```bash
 python3 run_experiment.py \
-  --config configs/flux2_klein_full.yaml \
+  --config configs/sdxl_turbo_full_finer.yaml \
   --stage analyze \
-  --run-id flux2_full \
-  --plot-alpha-range 0.3:0.7 \
-  --plot-gamma-range 0.1:0.6
+  --run-id sdxl_turbo_full_finer \
+  --plot-alpha-range 0.6:0.9 \
+  --plot-gamma-range 0.0125:0.1 \
+  2>&1 | tee logs/sdxl_turbo_full_finer_analyze.log
 ```
 
 The runner selects only values already listed in the YAML's `alpha_values` and `gamma_values` grids; it does not interpolate or invent display points. The selected alpha and gamma values filter proposed curves only: baseline is always drawn as its complete alpha sweep/reference set in both two-panel figures. The generated title records the proposed-display endpoints. This presentation filter does not remove any generated condition or any row from the analysis tables, Pareto calculations, matched-diversity calculations, or the standalone primary baseline curve.
@@ -149,7 +150,7 @@ When re-running only `analyze` for an existing complete run, the CLI retains the
 ```bash
 # Validate first: blocks_formal.jsonl must exist and contain approved blocks.
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage validate
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full
-python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generate --run-id flux2_full 2>&1 | tee logs/flux2_full_generate.log
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full 2>&1 | tee logs/flux2_full_metrics.log
+python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6 2>&1 | tee logs/flux2_full_analyze.log
 ```
