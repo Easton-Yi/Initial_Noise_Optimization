@@ -129,7 +129,7 @@ python3 run_experiment.py \
   --plot-gamma-range 0.1:0.6
 ```
 
-The runner selects only values already listed in the YAML's `alpha_values` and `gamma_values` grids; it does not interpolate or invent display points. Selected alpha values apply to baseline and proposed curves, while selected gamma values apply to proposed curves. The generated title records the selected endpoints. This presentation filter does not remove any generated condition or any row from the analysis tables, Pareto calculations, matched-diversity calculations, or the standalone primary baseline curve.
+The runner selects only values already listed in the YAML's `alpha_values` and `gamma_values` grids; it does not interpolate or invent display points. The selected alpha and gamma values filter proposed curves only: baseline is always drawn as its complete alpha sweep/reference set in both two-panel figures. The generated title records the proposed-display endpoints. This presentation filter does not remove any generated condition or any row from the analysis tables, Pareto calculations, matched-diversity calculations, or the standalone primary baseline curve.
 
 The detailed 25-target matched-diversity values remain in `analysis/tables/matched_diversity.csv`; the gamma summary used in the figure is in `analysis/tables/matched_diversity_summary.csv`. To request an individual baseline-versus-one-gamma plot, add an explicit item to `analysis.optional_detail_curves`, for example:
 

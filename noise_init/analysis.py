@@ -124,7 +124,14 @@ def _curve_id(metadata: dict[str, Any]) -> str:
     """Baseline is one alpha sweep; every proposed fixed gamma is another sweep."""
     if metadata["family"] == "baseline":
         return "baseline"
-    return f"{metadata['family']}_gamma_{float(metadata['gamma']):.1f}"
+    # ``.1f`` aliases fine-grid values such as 0.0125 and 0.025 to 0.0,
+    # merging distinct experimental curves before they reach the plotter.
+    return f"{metadata['family']}_gamma_{_format_grid_value(float(metadata['gamma']))}"
+
+
+def _format_grid_value(value: float) -> str:
+    """Stable, concise display/token form without collapsing fine-grid values."""
+    return f"{value:.8g}"
 
 
 def _anchor_condition(condition: str) -> str:
@@ -265,7 +272,7 @@ def _plot_baseline_qd(target: Path, rows: list[dict[str, Any]], pair: tuple[str,
     figure, axis = plt.subplots(figsize=(6, 4.5))
     _plot_baseline(axis, rows)
     for row in _series(rows, "baseline"):
-        axis.annotate(f"α={float(row['alpha']):.1f}", (row["diversity"], row["quality"]), fontsize=8, xytext=(3, 3), textcoords="offset points")
+        axis.annotate(f"α={_format_grid_value(float(row['alpha']))}", (row["diversity"], row["quality"]), fontsize=8, xytext=(3, 3), textcoords="offset points")
     _style_qd_axis(axis, pair, "Baseline Q–D curve")
     axis.legend(frameon=False)
     _save_figure(figure, target)
@@ -276,10 +283,13 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
     _plot_baseline(axis, rows)
     cmap = plt.colormaps["Blues" if family == "same_phase" else "Oranges"]
     curve_ids = sorted({row["curve_id"] for row in rows if row["family"] == family}, key=lambda value: float(value.rsplit("_", 1)[1]))
+    curve_gammas = {curve_id: float(_series(rows, curve_id)[0]["gamma"]) for curve_id in curve_ids}
+    gamma_values = tuple(curve_gammas[curve_id] for curve_id in curve_ids)
     for curve_id in curve_ids:
         series = _series(rows, curve_id)
-        gamma = float(series[0]["gamma"])
-        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=3, linewidth=1.25, label=f"γ={gamma:.1f}")
+        gamma = curve_gammas[curve_id]
+        color = _gamma_colour(cmap, gamma, gamma_values)
+        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"γ={_format_grid_value(gamma)}")
     _style_qd_axis(axis, pair, "Same-phase" if family == "same_phase" else "Independent-white")
     axis.legend(ncol=2, fontsize=8, frameon=False)
     # The baseline can span much more of the Q-D plane than the proposed
@@ -292,8 +302,8 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
         inset.plot([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", marker="o", markersize=2.8, linewidth=1.5, zorder=1)
         for curve_id in curve_ids:
             series = _series(rows, curve_id)
-            gamma = float(series[0]["gamma"])
-            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=cmap(.18 + .78 * gamma), marker="o", markersize=2.5, linewidth=1.0, zorder=2)
+            gamma = curve_gammas[curve_id]
+            inset.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=_gamma_colour(cmap, gamma, gamma_values), marker="o", markersize=2.5, linewidth=1.0, zorder=2)
         diversity = [float(row["diversity"]) for row in proposed]
         quality = [float(row["quality"]) for row in proposed]
         inset.set_xlim(*_padded_limits(diversity))
@@ -301,6 +311,13 @@ def _plot_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tupl
         inset.set_title("Zoom: baseline + proposed sweeps", fontsize=7)
         inset.tick_params(labelsize=6)
         inset.grid(alpha=.2)
+
+
+def _gamma_colour(cmap, gamma: float, selected_gammas: tuple[float, ...]):
+    """Map the displayed gamma range, not the absolute 0--1 interval, to colour."""
+    low, high = min(selected_gammas), max(selected_gammas)
+    position = .65 if np.isclose(low, high) else (gamma - low) / (high - low)
+    return cmap(.18 + .78 * position)
 
 
 def _padded_limits(values: list[float]) -> tuple[float, float]:
@@ -328,7 +345,7 @@ def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str
     for index, alpha in enumerate(alphas):
         series = sorted([row for row in rows if row["family"] == family and float(row["alpha"]) == alpha], key=lambda row: float(row["gamma"]))
         color = cmap(.12 + .78 * index / max(len(alphas) - 1, 1))
-        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"α={alpha:.1f}")
+        axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color=color, marker="o", markersize=3, linewidth=1.25, label=f"α={_format_grid_value(alpha)}")
     _style_qd_axis(axis, pair, "Same-phase: fixed α, γ sweep" if family == "same_phase" else "Independent-white: fixed α, γ sweep")
     axis.legend(ncol=2, fontsize=8, frameon=False)
     proposed = [row for row in rows if row["family"] == family]
@@ -355,7 +372,7 @@ def _plot_baseline_alpha_points(axis, rows: list[dict[str, Any]], *, annotate: b
     axis.scatter([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", s=32, label="baseline α points", zorder=3)
     if annotate:
         for row in baseline:
-            axis.annotate(f"α={float(row['alpha']):.1f}", (row["diversity"], row["quality"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
+            axis.annotate(f"α={_format_grid_value(float(row['alpha']))}", (row["diversity"], row["quality"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
 
 
 def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
@@ -378,18 +395,24 @@ def _two_panel_display(config: dict[str, Any]) -> dict[str, tuple[float, ...]]:
 
 def _display_title_fragment(display: dict[str, tuple[float, ...]]) -> str:
     def endpoint(values: tuple[float, ...]) -> str:
-        return f"{min(values):g}" if len(values) == 1 else f"{min(values):g}–{max(values):g}"
+        return _format_grid_value(min(values)) if len(values) == 1 else f"{_format_grid_value(min(values))}–{_format_grid_value(max(values))}"
     return f"α={endpoint(display['alpha_values'])}, γ={endpoint(display['gamma_values'])}"
 
 
 def _two_panel_rows(rows: list[dict[str, Any]], display: dict[str, tuple[float, ...]]) -> list[dict[str, Any]]:
-    """YAML-selected presentation subset for both Q-D two-panel figure families."""
+    """Presentation subset: full baseline, selected proposed alpha/gamma grid."""
     selected = []
     for row in rows:
+        # Baseline is the fixed reference for every comparison.  Its complete
+        # alpha sweep remains visible even when proposed curves are zoomed to
+        # a selected alpha/gamma display range.
+        if row["family"] == "baseline":
+            selected.append(row)
+            continue
         alpha = float(row["alpha"])
         if not any(np.isclose(alpha, allowed) for allowed in display["alpha_values"]):
             continue
-        if row["family"] != "baseline" and not any(np.isclose(float(row["gamma"]), allowed) for allowed in display["gamma_values"]):
+        if not any(np.isclose(float(row["gamma"]), allowed) for allowed in display["gamma_values"]):
             continue
         selected.append(row)
     if not any(row["family"] == "baseline" for row in selected):

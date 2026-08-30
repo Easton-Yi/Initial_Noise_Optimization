@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import _bootstrap_matched_improvements, _curve_id, interpolate_within, pareto_frontier
+from analysis import _bootstrap_matched_improvements, _curve_id, _two_panel_rows, interpolate_within, pareto_frontier
 from metric_runner import _group_quality_rows
 
 
@@ -31,6 +31,22 @@ class MetricContractTests(unittest.TestCase):
         self.assertEqual(_curve_id({"family": "baseline", "gamma": ""}), "baseline")
         self.assertEqual(_curve_id({"family": "same_phase", "gamma": "0.1"}), "same_phase_gamma_0.1")
         self.assertEqual(_curve_id({"family": "independent_white", "gamma": .9}), "independent_white_gamma_0.9")
+        self.assertEqual(_curve_id({"family": "same_phase", "gamma": .0125}), "same_phase_gamma_0.0125")
+        self.assertEqual(_curve_id({"family": "same_phase", "gamma": .025}), "same_phase_gamma_0.025")
+        self.assertNotEqual(_curve_id({"family": "same_phase", "gamma": .0125}), _curve_id({"family": "same_phase", "gamma": .025}))
+
+    def test_two_panel_keeps_the_complete_baseline_curve(self):
+        rows = [
+            {"family": "baseline", "alpha": alpha, "gamma": ""}
+            for alpha in (.0, .1, .2, .3, .4, .5, .6, .7)
+        ] + [
+            {"family": "same_phase", "alpha": alpha, "gamma": gamma}
+            for alpha in (.5, .6, .7)
+            for gamma in (.0125, .1)
+        ]
+        selected = _two_panel_rows(rows, {"alpha_values": (.6, .7), "gamma_values": (.0125, .1)})
+        self.assertEqual([row["alpha"] for row in selected if row["family"] == "baseline"], [.0, .1, .2, .3, .4, .5, .6, .7])
+        self.assertTrue(all(row["alpha"] in (.6, .7) for row in selected if row["family"] != "baseline"))
 
     def test_matched_diversity_bootstrap_includes_a_per_gamma_summary(self):
         values = {}
