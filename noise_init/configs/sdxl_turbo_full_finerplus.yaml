@@ -1,0 +1,40 @@
+experiment:
+  name: sdxl_turbo_full
+  master_seed: 20260830
+  gallery_size: 4
+  normalization_profile: per_sample_per_channel_zero_mean_unit_std
+  noise_frequency_grid: divgen_integer_fft_bin_indices_v1
+  noise_construction_version: exact_white_endpoints_profiled_normalization_v2
+  latent_injection_verification: prepare_latents_capture_v1
+paths:
+  outputs_root: outputs
+model:
+  adapter: sdxl_turbo
+  checkpoint: stabilityai/sdxl-turbo
+  vae_checkpoint: madebyollin/sdxl-vae-fp16-fix
+  revision: null
+  dtype: float16
+  device: cuda
+  cpu_offload: false
+  cache_dir: cache
+generation:
+  height: 512
+  width: 512
+  num_inference_steps: 1
+  guidance_scale: 0.0
+  generation_batch_size: 1
+  release_model_after_generation: true
+  output_format: png
+blocks: {manifest: manifests/blocks_formal.jsonl}
+baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+same_phase_floor: {enabled: true, alpha_values: [0.9, 1.0, 1.1, 1.3, 1.5], gamma_values: [0.025, 0.05, 0.075, 0.1, 0.125]}
+independent_white: {enabled: true, alpha_values: [0.9, 1.0, 1.1, 1.3, 1.5], gamma_values: [0.025, 0.05, 0.075, 0.1, 0.125]}
+quality_metrics:
+  clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
+  hpsv3: {enabled: true, checkpoint: official_default}
+  maniqa: {enabled: false}
+diversity_metrics:
+  dreamsim: {enabled: true, checkpoint: official_default, aggregation: mean_unordered_pair_distance}
+  lpips: {enabled: true, backbone: alex, aggregation: mean_unordered_pair_distance}
+  vendi_clip: {enabled: true, embedding_checkpoint: openai/clip-vit-large-patch14}
+analysis: {bootstrap_replicates: 2000, bootstrap_seed: 20260830, confidence_level: 0.95, compare_on_pareto_frontier: true, prohibit_extrapolation: true, primary_metric_pair: {quality: hpsv3, diversity: dreamsim_mean_pair_distance}, optional_detail_curves: []}

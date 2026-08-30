@@ -45,6 +45,16 @@ the post-hoc frequency validator before interpreting Q–D results:
 python3 noise_validation.py --run-id flux2_full
 ```
 
+`--alphas`/`--gammas` select which alpha/gamma values are drawn in
+`radial_psd_selected.png` and `theoretical_vs_empirical_psd.png` only (every
+other output always covers the full fixed grid); each accepts an inclusive
+`MIN:MAX` range, a single value, or a comma-separated list, resolved against
+the fixed grids, e.g.:
+
+```bash
+python3 noise_validation.py --run-id flux2_full --alphas 0.3:0.7 --gammas 0.1,0.3,0.6,0.9
+```
+
 This reconstructs every configured noise condition from the saved cache without
 sampling replacement noise, loading the diffusion model, or modifying generated
 images. It checks cache integrity, saved final-noise provenance where available,
