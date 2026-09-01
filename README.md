@@ -49,7 +49,7 @@ $\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v
 
 $z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big)$
 
-$z'_\alpha = \sqrt{1-\gamma}\, z_\alpha + \sqrt{\gamma}\, \eta, \qquad \eta \sim \mathrm{N}(0, I),\ \eta \perp z$
+$z'_\alpha = \sqrt{1-\gamma}\, z_\alpha + \sqrt{\gamma}\, \eta, \quad \eta \sim N(0, I),\quad \eta \perp z$
 
 //The mixed-in noise is independently sampled white noise η，not same z.
 
