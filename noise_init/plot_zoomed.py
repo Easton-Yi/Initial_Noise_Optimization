@@ -16,6 +16,7 @@ from typing import Any
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_RUN_DIR = PROJECT_DIR / "outputs" / "sdxl_turbo_full_finer"
+PRIMARY_PAIR = ("hpsv3", "dreamsim_mean_pair_distance")
 BASELINE_ALPHAS = (0.2, 0.3, 0.4, 0.5)
 DISPLAY_GAMMAS = (0.0125, 0.025, 0.05)
 FIXED_ALPHAS = (0.8, 0.9)
@@ -29,13 +30,26 @@ def _matches(value: str | float, allowed: tuple[float, ...]) -> bool:
     return any(math.isclose(float(value), candidate, abs_tol=1e-9) for candidate in allowed)
 
 
-def _read_rows(table: Path, quality: str, diversity: str) -> list[dict[str, Any]]:
+def _read_rows(table: Path) -> list[dict[str, Any]]:
     with table.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
+    if not rows:
+        raise RuntimeError(f"No aggregate rows in {table}")
+    return rows
+
+
+def _pair_rows(rows: list[dict[str, Any]], pair: tuple[str, str]) -> list[dict[str, Any]]:
+    quality, diversity = pair
     selected = [row for row in rows if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
     if not selected:
-        raise RuntimeError(f"No rows for {quality} × {diversity} in {table}")
+        raise RuntimeError(f"No rows for {quality} × {diversity}")
     return selected
+
+
+def _pair_target_dir(run_dir: Path, pair: tuple[str, str]) -> Path:
+    if pair == PRIMARY_PAIR:
+        return run_dir / "analysis" / "primary"
+    return run_dir / "analysis" / "robustness" / f"{pair[0]}__{pair[1]}"
 
 
 def _metric_label(metric: str) -> str:
@@ -217,19 +231,29 @@ def plot_fixed_alpha_two_panel(rows: list[dict[str, Any]], target: Path, quality
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR, help="Completed run directory (default: SDXL Turbo full finer output).")
-    parser.add_argument("--quality-metric", default="hpsv3")
-    parser.add_argument("--diversity-metric", default="dreamsim_mean_pair_distance")
+    parser.add_argument("--quality-metric", help="Optional quality metric; provide together with --diversity-metric to render one pair only.")
+    parser.add_argument("--diversity-metric", help="Optional diversity metric; provide together with --quality-metric to render one pair only.")
     args = parser.parse_args()
+    if bool(args.quality_metric) != bool(args.diversity_metric):
+        parser.error("--quality-metric and --diversity-metric must be supplied together")
 
     table = args.run_dir / "analysis" / "tables" / "all_curve_points.csv"
-    rows = _read_rows(table, args.quality_metric, args.diversity_metric)
-    target_dir = args.run_dir / "analysis" / "primary"
-    fixed_gamma = target_dir / "methods_qd_two_panel_zoomed.png"
-    fixed_alpha = target_dir / "fixed_alpha_gamma_qd_two_panel_zoomed.png"
-    plot_fixed_gamma_two_panel(rows, fixed_gamma, args.quality_metric, args.diversity_metric)
-    plot_fixed_alpha_two_panel(rows, fixed_alpha, args.quality_metric, args.diversity_metric)
-    print(f"Wrote {fixed_gamma}")
-    print(f"Wrote {fixed_alpha}")
+    all_rows = _read_rows(table)
+    available_pairs = sorted({(row["quality_metric"], row["diversity_metric"]) for row in all_rows})
+    if args.quality_metric:
+        pairs = [(args.quality_metric, args.diversity_metric)]
+    else:
+        # Primary first for readable console output, then all robustness pairs.
+        pairs = ([PRIMARY_PAIR] if PRIMARY_PAIR in available_pairs else []) + [pair for pair in available_pairs if pair != PRIMARY_PAIR]
+    for pair in pairs:
+        rows = _pair_rows(all_rows, pair)
+        target_dir = _pair_target_dir(args.run_dir, pair)
+        fixed_gamma = target_dir / "methods_qd_two_panel_zoomed.png"
+        fixed_alpha = target_dir / "fixed_alpha_gamma_qd_two_panel_zoomed.png"
+        plot_fixed_gamma_two_panel(rows, fixed_gamma, *pair)
+        plot_fixed_alpha_two_panel(rows, fixed_alpha, *pair)
+        print(f"Wrote {fixed_gamma}")
+        print(f"Wrote {fixed_alpha}")
 
 
 if __name__ == "__main__":

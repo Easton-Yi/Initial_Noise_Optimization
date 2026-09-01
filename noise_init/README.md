@@ -159,8 +159,11 @@ When re-running only `analyze` for an existing complete run, the CLI retains the
 
 `plot_zoomed.py` is a separate supplementary visualisation script. It reads the
 existing `sdxl_turbo_full_finer` aggregate table and does not modify the
-standard analysis figures or re-run generation/metrics. It writes two primary
-figures with a `_zoomed` suffix: a fixed-gamma alpha-sweep comparison using
+standard analysis figures or re-run generation/metrics. By default, it writes
+two `_zoomed` figures for every enabled metric pair: the primary pair goes in
+`analysis/primary/`, while the remaining five robustness pairs go in their
+existing `analysis/robustness/<quality>__<diversity>/` folders. Each pair gets
+a fixed-gamma alpha-sweep comparison using
 baseline `alpha=0.2,...,0.5` and proposed `gamma=0.0125,0.025,0.05`, plus a
 fixed-alpha gamma-sweep comparison for proposed `alpha=0.8,0.9` with nearby
 baseline reference points chosen automatically to keep those paths large.
