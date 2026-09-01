@@ -155,6 +155,20 @@ This produces only that requested detail under `analysis/optional_details/`; it 
 
 When re-running only `analyze` for an existing complete run, the CLI retains the run manifest's frozen bootstrap/statistical settings and records the current presentation choices in `analysis/analysis_manifest.json`. This permits a plotting-layout upgrade without regenerating images or metrics.
 
+### SDXL Turbo finer zoomed figures
+
+`plot_zoomed.py` is a separate supplementary visualisation script. It reads the
+existing `sdxl_turbo_full_finer` aggregate table and does not modify the
+standard analysis figures or re-run generation/metrics. It writes two primary
+figures with a `_zoomed` suffix: a fixed-gamma alpha-sweep comparison using
+baseline `alpha=0.2,...,0.5` and proposed `gamma=0.0125,0.025,0.05`, plus a
+fixed-alpha gamma-sweep comparison for proposed `alpha=0.8,0.9` with nearby
+baseline reference points chosen automatically to keep those paths large.
+
+```bash
+python3 plot_zoomed.py
+```
+
 ## Minimum formal run order
 
 ```bash
