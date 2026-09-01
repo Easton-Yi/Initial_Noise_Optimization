@@ -23,13 +23,9 @@ $\hat z \in (H\times W\times D)\ u,v\ domain$
 
 In some channel ∈ D
 
-$
-\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2} 
-$ $\qquad$ Radial distance from position $(u,v)$ to the centre within the fourier plain;
+$\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2}$ $\qquad$ Radial distance from position $(u,v)$ to the centre within the fourier plain;
 
-$
-z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big) 
-$ 
+$z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big)$ 
 
 ##
 ### Ours:
@@ -40,30 +36,20 @@ $
 ##
 #### Design A: Same-phase PSD floor
 
-$
-\hat z_{\alpha,\gamma}(u,v) = \hat z(u,v)\sqrt{(1-\gamma)H_\alpha(u,v)^2+\gamma} \quad H_\alpha(u,v)=\frac{1}{(1+f_{u,v})^\alpha} 
-$
+$\hat z_{\alpha,\gamma}(u,v) = \hat z(u,v)\sqrt{(1-\gamma)H_\alpha(u,v)^2+\gamma} \quad H_\alpha(u,v)=\frac{1}{(1+f_{u,v})^\alpha}$
 
 //given γ, the higher the freq, the higher it is lifted. $H_α$ is the response after $\alpha$ filtering
 
-$
-z_{\alpha,\gamma}=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_{\alpha,\gamma}(u,v))\big) 
-$
+$z_{\alpha,\gamma}=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_{\alpha,\gamma}(u,v))\big)$
 
 ##
 #### Design B: Independent-white replenishment
 
-$
-\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2} 
-$
+$\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2}$
 
-$
-z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big) 
-$
+$z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big)$
 
-$
-z'_\alpha=\sqrt{1-\gamma}\,z_\alpha+\sqrt{\gamma}\,\eta \qquad \eta\sim\mathcal N(0,I),\ \eta\perp z 
-$
+$z'_\alpha=\sqrt{1-\gamma}\,z_\alpha+\sqrt{\gamma}\,\eta \qquad \eta\sim\mathcal N(0,I),\ \eta\perp z$
 
 //The mixed-in noise is independently sampled white noise η，not same z.
 
