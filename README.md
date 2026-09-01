@@ -1,12 +1,4 @@
-# Update:
-- Had a meeting with Terry for discussion;
-  Some adjustment on the current experiment plan according to urgency.
-
-- Experiment in progress.
-
-
-##
-# Experiment in Progress:
+# Experiment under "noise_init"
 
 ## <u>1. Model and metric selection:</u>
 **For the model：**
@@ -24,18 +16,56 @@ Distilled be less stable on the generated result for different noise variance.
 
 ##
 ## <u>2. Noise Design:</u>
-white floor idea；
-May be different for the noise optained, and result generated:
-- Same-phase PSD floor：
-  - Operating in the FFT space：
-    $$\hat{z}_{\alpha,\gamma}^{\mathrm{same}}(f) = \hat{\epsilon}(f) \sqrt{(1-\gamma)H_\alpha(f)^2+\gamma}
-$$
-    
-- Independent-white replenishment
-  Can directly combine in noise space
-  (same effect as $\hat{z}_{\alpha,\gamma}^{\mathrm{ind}}(f)
-=\sqrt{1-\gamma}\,H_\alpha(f)\hat{\epsilon}(f)
-+\sqrt{\gamma}\,\hat{\eta}(f)$.)
+### Pink noise baseline:
+
+$z \in (H\times W\times D)$ white noise  
+$\hat z \in (H\times W\times D)\ u,v\ domain$
+
+In some channel ∈ D
+
+$
+\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2} 
+$ $\qquad$ Radial distance from position $(u,v)$ to the centre within the fourier plain;
+
+$
+z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big) 
+$ 
+
+##
+### Ours:
+
+**Increase α:** for pink, The higher the freq, the stronger the attenuation; (i.e. Reduce mid/high freq)  
+**what we want:** Restore its suppressed mid/high frequency power，since low-freq for diversity，high-freq：quality.
+
+##
+#### Design A: Same-phase PSD floor
+
+$
+\hat z_{\alpha,\gamma}(u,v) = \hat z(u,v)\sqrt{(1-\gamma)H_\alpha(u,v)^2+\gamma} \quad H_\alpha(u,v)=\frac{1}{(1+f_{u,v})^\alpha} 
+$
+
+//given γ, the higher the freq, the higher it is lifted. $H_α$ is the response after $\alpha$ filtering
+
+$
+z_{\alpha,\gamma}=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_{\alpha,\gamma}(u,v))\big) 
+$
+
+##
+#### Design B: Independent-white replenishment
+
+$
+\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v}=\sqrt{u^2+v^2} 
+$
+
+$
+z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big) 
+$
+
+$
+z'_\alpha=\sqrt{1-\gamma}\,z_\alpha+\sqrt{\gamma}\,\eta \qquad \eta\sim\mathcal N(0,I),\ \eta\perp z 
+$
+
+//The mixed-in noise is independently sampled white noise η，not same z.
 
 ##
 ## <u>3. Process:</u>
