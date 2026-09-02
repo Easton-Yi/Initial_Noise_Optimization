@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from analysis import _bootstrap_matched_improvements, _curve_id, _two_panel_rows, interpolate_within, pareto_frontier
+from analysis import _available_gammas, _bootstrap_matched_improvements, _curve_id, _two_panel_rows, interpolate_within, pareto_frontier
 from metric_runner import _group_quality_rows
 
 
@@ -47,6 +47,16 @@ class MetricContractTests(unittest.TestCase):
         selected = _two_panel_rows(rows, {"alpha_values": (.6, .7), "gamma_values": (.0125, .1)})
         self.assertEqual([row["alpha"] for row in selected if row["family"] == "baseline"], [.0, .1, .2, .3, .4, .5, .6, .7])
         self.assertTrue(all(row["alpha"] in (.6, .7) for row in selected if row["family"] != "baseline"))
+
+    def test_gamma_axis_uses_only_actual_available_grid_values(self):
+        rows = [
+            {"family": "same_phase", "gamma": ".0125", "available": True},
+            {"family": "same_phase", "gamma": ".025", "available": True},
+            {"family": "independent_white", "gamma": ".05", "available": True},
+            {"family": "same_phase", "gamma": ".1", "available": False},
+            {"family": "baseline", "gamma": "", "available": True},
+        ]
+        self.assertEqual(_available_gammas(rows), (.0125, .025, .05))
 
     def test_matched_diversity_bootstrap_includes_a_per_gamma_summary(self):
         values = {}

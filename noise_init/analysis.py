@@ -426,6 +426,8 @@ def _two_panel_rows(rows: list[dict[str, Any]], display: dict[str, tuple[float, 
 def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> None:
     import matplotlib.pyplot as plt
     figure, axis = plt.subplots(figsize=(6, 4.5))
+    gammas = _available_gammas(rows)
+    positions = {gamma: index for index, gamma in enumerate(gammas)}
     for family, label, color in (("same_phase", "Same-phase", "#2166ac"), ("independent_white", "Independent-white", "#b35806")):
         series = sorted([row for row in rows if row.get("family") == family and row.get("available")], key=lambda row: float(row["gamma"]))
         if not series:
@@ -434,13 +436,24 @@ def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> No
         gain = [float(row["mean_quality_improvement"]) for row in series]
         lower = [value - float(row["bootstrap_ci_low"]) for value, row in zip(gain, series)]
         upper = [float(row["bootstrap_ci_high"]) - value for value, row in zip(gain, series)]
-        axis.errorbar(gamma, gain, yerr=[lower, upper], color=color, marker="o", capsize=3, label=label)
+        # Gamma grids may be deliberately non-uniform (for example the SDXL
+        # finer sweep).  Use their ordered grid positions so each tested value
+        # remains readable rather than clustering all low gamma values near 0.
+        axis.errorbar([positions[value] for value in gamma], gain, yerr=[lower, upper], color=color, marker="o", capsize=3, label=label)
     axis.axhline(0, color="black", linewidth=.8)
     axis.set(xlabel="γ", ylabel="Mean Δ quality at matched diversity", title="Matched-diversity quality gain")
-    axis.set_xticks([round(index / 10, 1) for index in range(1, 10)])
+    axis.set_xticks(range(len(gammas)))
+    axis.set_xticklabels([_format_grid_value(gamma) for gamma in gammas])
+    if gammas:
+        axis.set_xlim(-.5, len(gammas) - .5)
     axis.grid(alpha=.2)
     axis.legend(frameon=False)
     _save_figure(figure, target)
+
+
+def _available_gammas(rows: list[dict[str, Any]]) -> tuple[float, ...]:
+    """Actual gamma values represented by the plotted summary rows."""
+    return tuple(sorted({float(row["gamma"]) for row in rows if row.get("family") in {"same_phase", "independent_white"} and row.get("available")}))
 
 
 def _plot_single_curve_comparison(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], curve_id: str) -> None:
