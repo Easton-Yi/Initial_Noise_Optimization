@@ -26,8 +26,8 @@ generation:
   output_format: png
 blocks: {manifest: manifests/blocks_pilot.jsonl}
 baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
-same_phase_floor: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
-independent_white: {enabled: false, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], gamma_values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
+same_phase_floor: {enabled: false, alpha_values: [0.6, 0.7, 0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05, 0.075, 0.1]}
+independent_white: {enabled: false, alpha_values: [0.6, 0.7, 0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05, 0.075, 0.1]}
 quality_metrics:
   clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
   hpsv3: {enabled: true, checkpoint: official_default}
