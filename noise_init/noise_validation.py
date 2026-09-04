@@ -531,8 +531,8 @@ def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str |
     _plot_theoretical_vs_empirical(out_dir / "theoretical_vs_empirical_psd.png", conditions, accumulators, r,
                                     bin_index_flat, counts, run_id, r_max, alphas, gammas)
     _plot_equivalent_alpha_heatmap(out_dir / "equivalent_alpha_heatmap.png", equivalent_alpha_map, run_id,
-                                    proposed_alphas, proposed_gammas, baseline_alphas)
-    _plot_coherence_heatmap(out_dir / "coherence_heatmap.png", coherence_map, run_id, proposed_alphas, proposed_gammas)
+                                    list(alphas), list(gammas), baseline_alphas)
+    _plot_coherence_heatmap(out_dir / "coherence_heatmap.png", coherence_map, run_id, list(alphas), list(gammas))
 
     return {
         "run_id": run_id, "run_dir": run_dir, "num_blocks": len(blocks), "num_conditions": len(conditions),
