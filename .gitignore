@@ -9,11 +9,13 @@ __pycache__/
 venv/
 
 # Experiment artefacts and heavyweight local caches
-openai
-noise_init/outputs/
-noise_init/cache/
-noise_init/.cache/
-logs
+openai/
+pc_specific_psd/calibration/
+outputs/
+cache/
+.cache/
+manifests/
+logs/
 *.pt
 *.pth
 *.safetensors
