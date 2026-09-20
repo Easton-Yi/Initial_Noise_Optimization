@@ -479,7 +479,9 @@ def generate_probes(
     basis_hash = probe_basis_hash_for(config)
     ensure_immutable_run(run_dir, _probe_run_provenance(config, basis_hash), force=force)
 
-    height, width = config.generation.config.height, config.generation.config.width
+    # SDXL-Turbo: latent spatial dimensions are image dimensions / 8.
+    height = config.generation.config.height // 8
+    width = config.generation.config.width // 8
     channels = config.basis.channels
     loaded_basis = load_basis(
         config.resolve_root(config.basis.basis_output_path),

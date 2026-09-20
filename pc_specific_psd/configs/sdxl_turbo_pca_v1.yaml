@@ -50,7 +50,7 @@ basis:
   split_seed: 20260827
   basis_output_path: ../basis/sdxl_turbo_pca_v1_basis.pt
   num_leading_components: 32
-  dataset_manifest_path: null
+  dataset_manifest_path: /workspace/Initial_Noise_Optimization/pc_specific_psd/manifests/coco_train2017_2000_seed20260829.json
 
 probing:
   rho: 0.10

@@ -176,7 +176,14 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
         vae = self.pipe.vae
         with torch.inference_mode():
             batch = batch.to(device=self.device, dtype=self.dtype)
-            latents = vae.encode(batch).latent_dist.mean * vae.config.scaling_factor
+            with torch.no_grad():
+                latents = torch.cat(
+                    [
+                        vae.encode(image).latent_dist.mean
+                        for image in batch.split(1)
+                    ],
+                    dim=0,
+                ) * vae.config.scaling_factor
         return latents.detach().to("cpu", torch.float32).contiguous()
 
     def generate(
@@ -317,7 +324,13 @@ def smoke_check(config: "PCASpecificPSDConfig", adapter: SDXLTurboAdapterPCA, *,
     """
     try:
         channels = config.basis.channels
-        height, width = config.generation.config.height, config.generation.config.width
+
+        if adapter.pipe is None:
+            adapter._load()
+        vae_scale = adapter.pipe.vae_scale_factor
+        height = config.generation.config.height // vae_scale
+        width = config.generation.config.width // vae_scale
+
         if codec.channels != channels or codec.patch_size != config.basis.patch_size:
             return SmokeCheckResult(
                 passed=False,

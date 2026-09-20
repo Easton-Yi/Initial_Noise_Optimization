@@ -219,7 +219,8 @@ def _cmd_inspect_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespac
 
 def _cmd_probe(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     channels = cfg.basis.channels
-    height, width = cfg.generation.config.height, cfg.generation.config.width
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
     patch_size = cfg.basis.patch_size
     rho = cfg.probing.rho
 
@@ -275,8 +276,11 @@ def _cmd_probe(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> di
 
 def _cmd_export_review(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     entries = probing.build_probing_manifest(
-        channels=cfg.basis.channels, height=cfg.generation.config.height, width=cfg.generation.config.width,
-        patch_size=cfg.basis.patch_size, rho=cfg.probing.rho,
+        channels=cfg.basis.channels,
+        height=cfg.generation.config.height // 8,
+        width=cfg.generation.config.width // 8,
+        patch_size=cfg.basis.patch_size,
+        rho=cfg.probing.rho,
     )
     review_path = Path(args.review_output) if args.review_output else _default_path(cfg, "probe_review_template.json")
     mapping_path = Path(args.mapping_output) if args.mapping_output else _default_path(cfg, "probe_review_mapping.json")
@@ -301,7 +305,8 @@ def _cmd_select_candidates(cfg: config.PCASpecificPSDConfig, args: argparse.Name
 
 
 def _cmd_calibrate(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
-    height, width = cfg.generation.config.height, cfg.generation.config.width
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
     candidate_group_ids = set(_read_candidates(cfg, args.candidates_file)) if args.candidates_file else None
     if args.dry_run:
         return {
@@ -386,7 +391,8 @@ def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespa
     load, no new generation, mirroring ``noise_init/noise_validation.py``'s
     standalone pattern.
     """
-    height, width = cfg.generation.config.height, cfg.generation.config.width
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
     if args.dry_run:
         return {"status": "dry-run", "note": "replays the frozen calibration registry against a reconstructed calibration bank"}
 
@@ -674,7 +680,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_gallery_parser.add_argument("--mapping-file", default=None)
     ingest_gallery_parser.add_argument("--output", default=None)
 
-    metrics_parser = subparsers.add_parser("metrics", parents=[common, force])
+    metrics_parser = subparsers.add_parser("metrics", parents=[common, force, candidates_flag])
     metrics_parser.add_argument("--device", default="cpu")
 
     analyze_parser = subparsers.add_parser("analyze", parents=[common])

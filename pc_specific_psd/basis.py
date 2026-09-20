@@ -295,6 +295,7 @@ def save_basis(basis: PCABasis, path: str | Path) -> None:
         "num_samples": basis.num_samples,
         "metadata": basis.metadata,
     }
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, Path(path))
 
 

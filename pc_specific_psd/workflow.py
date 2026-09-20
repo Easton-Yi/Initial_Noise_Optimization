@@ -240,7 +240,8 @@ def _run_smoke_check(cfg: config.PCASpecificPSDConfig, state: dict, adapter_obj,
 
 
 def _stage_calibrate(cfg: config.PCASpecificPSDConfig, candidate_group_ids: Sequence[str], *, allow_synthetic_basis: bool) -> dict:
-    height, width = cfg.generation.config.height, cfg.generation.config.width
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
     candidate_set = set(candidate_group_ids)
     codec = runner.load_codec(cfg, allow_synthetic=allow_synthetic_basis)
     calibration_bank = _calibration_bank(cfg, height=height, width=width)
@@ -318,7 +319,7 @@ def run_workflow(
     preview_exclusion_file: Optional[str] = None,
     generation_python: Optional[str] = None,
     metrics_python: Optional[str] = None,
-    metrics_device: str = "cpu",
+    metrics_device: str = "cuda",
     skip_smoke_check: bool = False,
     dry_run: bool = False,
     adapter: Optional[SDXLTurboAdapterPCA] = None,
@@ -377,8 +378,11 @@ def run_workflow(
     # -- Stage 4: probe -------------------------------------------------------
     probe_run_id = f"{base_run_id}_probe"
     entries = probing.build_probing_manifest(
-        channels=cfg.basis.channels, height=cfg.generation.config.height,
-        width=cfg.generation.config.width, patch_size=cfg.basis.patch_size, rho=cfg.probing.rho,
+        channels=cfg.basis.channels,
+        height=cfg.generation.config.height // 8,
+        width=cfg.generation.config.width // 8,
+        patch_size=cfg.basis.patch_size,
+        rho=cfg.probing.rho,
     )
     dispatched = _maybe_subprocess(generation_python, [
         "probe", "--config", config_path, "--run-id", probe_run_id,
@@ -511,6 +515,7 @@ def run_workflow(
     cfg = config.resolve_config(config_path, "metrics", candidate_group_ids)
     dispatched = _maybe_subprocess(metrics_python, [
         "metrics", "--config", config_path, "--run-id", _metrics_run_dir_name(full_run_dir),
+        "--candidates-file", str(candidates_path),
         "--device", metrics_device,
         *(["--force"] if force else []),
     ])

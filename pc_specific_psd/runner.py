@@ -257,7 +257,8 @@ def generate_manifest(
     ensure_immutable_run(run_dir, _run_provenance(config, basis_hash, calibration_hash), force=force)
 
     codec = load_codec(config, allow_synthetic=allow_synthetic_basis)
-    height, width = config.generation.config.height, config.generation.config.width
+    height = config.generation.config.height // 8
+    width = config.generation.config.width // 8
     channels = config.basis.channels
     corrections = build_frozen_corrections(config, codec, height=height, width=width)
 

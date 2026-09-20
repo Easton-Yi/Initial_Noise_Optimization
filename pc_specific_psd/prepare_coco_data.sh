@@ -26,7 +26,7 @@ REPO_ROOT="${2:-/workspace/Initial_Noise_Optimization}"
 SEED=20260829
 COUNT=2000
 
-ANNOTATION_URL="https://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+ANNOTATION_URL="http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 ANNOTATION_ZIP="${DATA_ROOT}/annotations_trainval2017.zip"
 ANNOTATION_DIR="${DATA_ROOT}/annotations"
 ANNOTATION_JSON="${ANNOTATION_DIR}/instances_train2017.json"
