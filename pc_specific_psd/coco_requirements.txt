@@ -1,0 +1,5 @@
+bash
+wget
+unzip
+sha256sum
+Pillow
