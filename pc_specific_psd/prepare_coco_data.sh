@@ -73,6 +73,7 @@ if [ ! -f "${ANNOTATION_JSON}" ]; then
     echo "Downloading official COCO 2017 annotations..."
 
     wget \
+        --no-check-certificate \
         --continue \
         --directory-prefix="${DATA_ROOT}" \
         "${ANNOTATION_URL}"
@@ -176,6 +177,7 @@ echo "Downloading selected COCO images..."
 # Existing complete files are retained. Partial files can be resumed by
 # rerunning this script because wget uses --continue.
 wget \
+    --no-check-certificate \
     --continue \
     --no-verbose \
     --directory-prefix="${IMAGE_DIR}" \
