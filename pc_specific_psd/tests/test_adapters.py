@@ -13,6 +13,7 @@ from pc_specific_psd.compat_generation import GenerationConfig, derived_seed
 class _FakePipeline:
     def __init__(self):
         self.received_generators: list[torch.Generator | None] = []
+        self.last_call_kwargs = None
 
     def prepare_latents(self, batch_size, latents=None):
         self.received = latents
@@ -21,6 +22,7 @@ class _FakePipeline:
     def __call__(self, *, latents, generator=None, **kwargs):
         self.prepare_latents(1, latents=latents)
         self.received_generators.append(generator)
+        self.last_call_kwargs = kwargs
         return SimpleNamespace(images=[Image.new("RGB", (2, 2))])
 
 
@@ -165,6 +167,21 @@ class VerifyAndRecordRevisionTests(unittest.TestCase):
 
 
 class PairedGeneratorTests(unittest.TestCase):
+    def test_512_image_generation_keeps_64_square_latent_and_512_pipeline_size(self):
+        adapter = _TestAdapterPCA(_config())
+        latents = torch.randn(1, 4, 64, 64)
+        generation = GenerationConfig(
+            height=512, width=512, num_inference_steps=1, guidance_scale=0.0,
+            generation_batch_size=1,
+        )
+        adapter.generate(
+            "prompt", latents, [("p000", "p000_s000", 0)], seed=999,
+            generation_config=generation,
+        )
+        self.assertEqual(tuple(adapter.pipe.received.shape), (1, 4, 64, 64))
+        self.assertEqual(adapter.pipe.last_call_kwargs["height"], 512)
+        self.assertEqual(adapter.pipe.last_call_kwargs["width"], 512)
+
     def test_same_pair_key_across_two_calls_gives_identical_generator_seed(self):
         adapter = _TestAdapterPCA(_config())
         pair_key = ("p000", "p000_s000", 0)
@@ -276,7 +293,7 @@ class EncodeImagesForBasisTests(unittest.TestCase):
                 self._write_image(tmp_path, "c.png", (0, 0, 0)),
             ]
             latents = adapter.encode_images_for_basis(paths)
-        self.assertEqual(latents.shape[0], 3)
+        self.assertEqual(tuple(latents.shape), (3, 4, 64, 64))
         self.assertEqual(latents.dtype, torch.float32)
         self.assertEqual(latents.device.type, "cpu")
 

@@ -34,6 +34,7 @@ manufactures a spurious nonzero correction at the identity point.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
@@ -77,8 +78,9 @@ def compute_reference_power(
     every round without ever reducing the relative error). ``operator_clean``
     never normalizes anywhere, so the reference stays unnormalized to match.
 
-    Reference is exactly ``psd_editor.apply_psd_edit_tau_zero`` (bit-for-bit
-    ``same_phase_floor``), never the raw editor path evaluated at tau=0 --
+    Reference is exactly ``psd_editor.apply_psd_edit_tau_zero``
+    (``same_phase_floor`` times its fixed analytic expected-unit-RMS scale),
+    never the raw editor path evaluated at tau=0 --
     this keeps the reference target definition-driven rather than an
     ordinary measurement subject to the same sampling noise as candidates.
     """
@@ -281,7 +283,14 @@ def _select_closest_rms(candidates: Sequence[float], evaluations: dict[float, Ca
     best_tau, best_distance = None, None
     for tau in candidates:
         distance = abs(evaluations[tau].measured_rms - target_rms)
-        if best_distance is None or distance < best_distance:
+        # A target constructed as the midpoint of two binary floating-point
+        # RMS values can leave the two mathematically equal distances one ulp
+        # apart. Treat numerical ties as ties so declared order remains the
+        # deterministic tiebreaker promised by this function.
+        if best_distance is None or (
+            distance < best_distance
+            and not math.isclose(distance, best_distance, rel_tol=1e-12, abs_tol=1e-12)
+        ):
             best_tau, best_distance = tau, distance
     assert best_tau is not None  # candidates is non-empty by construction (validated by caller)
     return best_tau

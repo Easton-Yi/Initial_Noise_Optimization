@@ -135,7 +135,12 @@ def _read_candidates(cfg: config.PCASpecificPSDConfig, override: str | None) -> 
 
 
 def _cmd_validate_config(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
-    return {"status": "ok", "run_name": cfg.run.name, "config_path": str(cfg.config_path)}
+    return {
+        "status": "ok",
+        "run_name": cfg.run.name,
+        "config_path": str(cfg.config_path),
+        "provenance": cfg.provenance(),
+    }
 
 
 def _cmd_build_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:

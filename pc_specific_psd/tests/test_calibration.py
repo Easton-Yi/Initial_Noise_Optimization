@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -43,6 +44,11 @@ class ComputeReferencePowerTests(unittest.TestCase):
         operator_clean = calibration.compute_reference_power(bank, NUM_BINS, protocol="operator_clean")
         self.assertTrue(torch.allclose(manual, legacy))
         self.assertFalse(torch.allclose(legacy, operator_clean))
+
+    def test_operator_clean_never_calls_per_sample_normalize(self):
+        bank = _bank()
+        with patch.object(calibration, "normalize", side_effect=AssertionError("normalize called")):
+            calibration.compute_reference_power(bank, NUM_BINS, protocol="operator_clean")
 
 
 class ComputeRadialCorrectionTests(unittest.TestCase):
@@ -136,6 +142,16 @@ class EvaluateCandidateTests(unittest.TestCase):
                 self.codec, self.bank, self.group_indices, self.gate, 0.5, reference_power,
                 num_bins=NUM_BINS, protocol="bogus", psd_tolerance=0.05, correction_gain_bound=10.0,
             )
+
+    def test_operator_clean_candidate_never_calls_per_sample_normalize(self):
+        reference_power = calibration.compute_reference_power(self.bank, NUM_BINS, protocol="operator_clean")
+        with patch.object(calibration, "normalize", side_effect=AssertionError("normalize called")):
+            evaluation = calibration.evaluate_candidate(
+                self.codec, self.bank, self.group_indices, self.gate, 0.5, reference_power,
+                num_bins=NUM_BINS, protocol="operator_clean", psd_tolerance=1.0,
+                correction_gain_bound=1e9,
+            )
+        self.assertTrue(evaluation.accepted)
 
     def test_operator_clean_converges_in_two_iterations_even_at_tight_tolerance(self):
         reference_power = calibration.compute_reference_power(self.bank, NUM_BINS, protocol="operator_clean")

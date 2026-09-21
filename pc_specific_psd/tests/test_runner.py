@@ -59,6 +59,20 @@ class BuildFrozenCorrectionsTests(unittest.TestCase):
             with self.assertRaises(runner.RunnerError):
                 runner.build_frozen_corrections(loaded, codec, height=16, width=16)
 
+    def test_raises_clear_recalibration_error_for_legacy_registry_without_scale_profile(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = load_test_config(Path(tmp))
+            freeze_selected_calibration(loaded, group_ids=["B5"])
+            registry_path = loaded.resolve_root(loaded.psd.calibration_result_path)
+            payload = json.loads(registry_path.read_text())
+            payload.pop("reference_scale_profile")
+            registry_path.write_text(json.dumps(payload))
+            codec = runner.load_codec(loaded, allow_synthetic=True)
+            with self.assertRaisesRegex(runner.RunnerError, "stale.*calibrate"):
+                runner.build_frozen_corrections(loaded, codec, height=16, width=16)
+
     def test_replays_exactly_the_declared_and_selected_groups(self):
         with tempfile.TemporaryDirectory() as tmp:
             loaded = load_test_config(Path(tmp))

@@ -36,9 +36,11 @@ class LoadConfigStructureTests(unittest.TestCase):
             loaded = config.load_config(path)
             self.assertEqual(loaded.frozen.same_phase_alpha, 0.9)
             self.assertEqual(loaded.frozen.same_phase_gamma, 0.05)
+            self.assertEqual(loaded.frozen.reference_scale_profile, "expected_unit_rms_rfft_v1")
             provenance = loaded.provenance()
             self.assertEqual(provenance["same_phase_alpha"], 0.9)
             self.assertEqual(provenance["same_phase_gamma"], 0.05)
+            self.assertEqual(provenance["reference_scale_profile"], "expected_unit_rms_rfft_v1")
 
     def test_generation_missing_required_field_raises_config_error(self):
         raw = {**MINIMAL_RAW, "generation": {"height": 16, "width": 16}}
@@ -100,6 +102,13 @@ class LoadConfigStructureTests(unittest.TestCase):
 
     def test_psd_rejects_frozen_constant_override(self):
         raw = {**MINIMAL_RAW, "psd": {"same_phase_alpha": 0.5}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_config(Path(tmp), raw)
+            with self.assertRaisesRegex(config.ConfigError, "frozen constant"):
+                config.load_config(path)
+
+    def test_psd_rejects_reference_scale_profile_override(self):
+        raw = {**MINIMAL_RAW, "psd": {"reference_scale_profile": "other_profile"}}
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_config(Path(tmp), raw)
             with self.assertRaisesRegex(config.ConfigError, "frozen constant"):

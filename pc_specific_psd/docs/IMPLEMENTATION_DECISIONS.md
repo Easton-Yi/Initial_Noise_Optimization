@@ -226,6 +226,33 @@ for them and any attempt to supply one is rejected
 config/provenance output for transparency, per the plan's requirement that
 frozen constants remain visible even though they aren't user-configurable.
 
+The `operator_clean` reference and every candidate now use the frozen scale
+profile `expected_unit_rms_rfft_v1`. The unscaled response remains
+`sqrt((1-gamma) * H_alpha(r)^2 + gamma)`, but is multiplied once by the
+reciprocal of its analytic expected RMS. The expectation is computed with
+Parseval's theorem over the rFFT half-spectrum: DC has conjugate weight 1,
+the Nyquist column has weight 1 only for even widths, all other positive
+frequency columns have weight 2, and the denominator is `height * width`.
+For the production 64×64 latent this raw multiplier is approximately
+0.2367667109 and the derived scale is approximately 4.2235667177; neither
+number is hard-coded in production code.
+
+This is one deterministic scalar for a fixed `(height, width, alpha, gamma)`,
+not a statistic of an individual latent. It therefore preserves linearity,
+Gaussianity, phase, and the same-phase relative spectral shape. A per-sample
+or per-channel normalization would be nonlinear and realization-dependent,
+so `operator_clean` continues not to call `normalize()`. The scale is applied
+inside the shared reference response only: `apply_psd_edit_tau_zero()` uses
+it for the reference and `apply_psd_edit()` uses it for candidates, while
+calibration and runner add no second scale.
+
+Calibration registries persist this profile. A legacy registry with no
+profile is loadable for diagnosis but is stale for full/generation commands
+and must be regenerated; smoke-check cache keys also include the profile.
+This RMS correction is independent of the earlier geometry correction:
+SDXL-Turbo output remains 512×512, while probing, calibration, smoke checks,
+preview, and full-pilot operators continue to use 4×64×64 latents.
+
 ## Calibration-default rationale and status
 
 `calibration.py` implements the plan's exact procedure: walk `(r_s, beta)`
@@ -407,10 +434,12 @@ Five decisions were made in doing this:
    no calibration), confirms the exact same tensor was what got passed to
    `adapter.generate()` (via the existing tensor-hash provenance fields, no
    new instrumentation), and compares it against the canonical
-   `same_phase_floor` ground truth (`compat_generation`'s re-export of the
+   analytically scaled `same_phase_floor` ground truth
+   (`compat_generation`'s re-export of the
    independent reference implementation, not a second internal derivation of
-   the same shortcut checked against itself). Its cache key is
-   `(config_hash, basis_hash)` only — deliberately excluding
+   the same shortcut checked against itself), and verifies analytic response
+   energy is one. Its cache key is
+   `(config_hash, basis_hash, reference_scale_profile)` — deliberately excluding
    `calibration_hash` — so the same cached pass covers both the pre-probing
    and pre-full-pilot call sites whenever config/basis haven't changed,
    without ever depending on calibration having happened.

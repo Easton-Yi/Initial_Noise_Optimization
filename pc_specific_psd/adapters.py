@@ -291,12 +291,15 @@ _SMOKE_CHECK_PROMPT = manifests.PROMPTS[0]
 _SMOKE_CHECK_BLOCK = manifests.SeedBlock(_SMOKE_CHECK_PROMPT.prompt_id, 0, _SMOKE_CHECK_PROMPT.batch_seeds[0])
 
 
-def smoke_check_cache_key(config: "PCASpecificPSDConfig") -> tuple[str, str]:
-    """``(config_hash, basis_hash)`` -- the one cache key both the pre-probing
+def smoke_check_cache_key(config: "PCASpecificPSDConfig") -> tuple[str, str, str]:
+    """``(config_hash, basis_hash, reference_scale_profile)`` cache key.
+
+    This is the one key both the pre-probing
     and post-preview smoke-check call sites use. ``calibration_hash`` is
     deliberately excluded: the check itself never reads a calibration result,
     so ``workflow.py`` can reuse the pre-probing pass's result once
-    calibration exists, and only needs to re-run if config or basis changed.
+    calibration exists. The frozen scale profile is explicit so a pass cached
+    under the pre-fix reference operator can never be reused.
     Basis-hash logic duplicates ``runner.basis_hash_for``/
     ``probing.probe_basis_hash_for`` rather than importing either -- both of
     those modules import this one, so importing back would close the cycle.
@@ -307,7 +310,7 @@ def smoke_check_cache_key(config: "PCASpecificPSDConfig") -> tuple[str, str]:
     basis_path = config.resolve_root(config.basis.basis_output_path)
     if basis_path is None or not basis_path.exists():
         raise RuntimeError(f"basis file does not exist: {basis_path}; run build-basis first")
-    return config_hash, file_hash(basis_path)
+    return config_hash, file_hash(basis_path), config.frozen.reference_scale_profile
 
 
 def smoke_check(config: "PCASpecificPSDConfig", adapter: SDXLTurboAdapterPCA, *, codec: OverlapCodec) -> SmokeCheckResult:
@@ -317,9 +320,9 @@ def smoke_check(config: "PCASpecificPSDConfig", adapter: SDXLTurboAdapterPCA, *,
     ``psd_editor.apply_psd_edit_tau_zero`` and checks it is finite and
     correctly shaped; (2) confirms the tensor actually injected into the
     pipeline (via ``adapter.last_generated_latent_hashes``) is that same
-    tensor; (3) compares it against ``same_phase_floor`` computed directly
-    with the frozen constants -- the independent ground truth, not a second
-    internal derivation of the same shortcut. Any exception or failed
+    tensor; (3) compares it against ``same_phase_floor`` times the analytic
+    scale; and (4) verifies the scaled response has analytic expected RMS one.
+    Any exception or failed
     assertion is caught and returned as ``passed=False``; this never raises.
     """
     try:
@@ -353,6 +356,15 @@ def smoke_check(config: "PCASpecificPSDConfig", adapter: SDXLTurboAdapterPCA, *,
                 passed=False, reason=f"tau=0 latent shape {tuple(latent.shape)} != expected {expected_shape}"
             )
 
+        latent_rms = float(
+            latent.detach().to(torch.float32).square().mean().sqrt()
+        )
+        if not 0.9 <= latent_rms <= 1.1:
+            return SmokeCheckResult(
+                passed=False,
+                reason=f"tau=0 latent RMS is {latent_rms:.6f}, expected approximately 1",
+            )
+
         pair_key = (_SMOKE_CHECK_BLOCK.prompt_id, _SMOKE_CHECK_BLOCK.block_id, manifests.PROBING_BASE_INDEX)
         adapter.generate(
             _SMOKE_CHECK_PROMPT.text, latent, [pair_key], seed=config.run.master_seed,
@@ -364,10 +376,21 @@ def smoke_check(config: "PCASpecificPSDConfig", adapter: SDXLTurboAdapterPCA, *,
                 passed=False, reason="pipeline received a different latent than the tau=0 latent that was computed"
             )
 
-        ground_truth = same_phase_floor(base_white, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA)
+        scale = psd_editor.reference_expected_unit_rms_scale(height, width)
+        ground_truth = same_phase_floor(
+            base_white, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA
+        ) * scale
         if not torch.allclose(latent, ground_truth, atol=1e-4, rtol=1e-4):
             return SmokeCheckResult(
-                passed=False, reason="tau=0 latent disagrees with the independent same_phase_floor ground truth"
+                passed=False,
+                reason="tau=0 latent disagrees with the scaled same_phase_floor ground truth",
+            )
+
+        scaled_expected_rms = psd_editor.reference_expected_rms_multiplier(height, width) * scale
+        if not 0.999 <= scaled_expected_rms <= 1.001:
+            return SmokeCheckResult(
+                passed=False,
+                reason=f"tau=0 analytic expected RMS is {scaled_expected_rms:.6f}, expected approximately 1",
             )
 
         return SmokeCheckResult(passed=True)

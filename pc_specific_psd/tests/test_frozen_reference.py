@@ -32,9 +32,15 @@ class FrozenConstantValuesTests(unittest.TestCase):
     def test_same_phase_gamma_is_exactly_zero_point_zero_five(self):
         self.assertEqual(psd_editor.SAME_PHASE_GAMMA, 0.05)
 
+    def test_reference_scale_profile_is_frozen(self):
+        self.assertEqual(psd_editor.REFERENCE_SCALE_PROFILE, "expected_unit_rms_rfft_v1")
+
     def test_config_frozen_constants_default_to_the_same_source_values(self):
         self.assertEqual(config.FrozenConstants().same_phase_alpha, psd_editor.SAME_PHASE_ALPHA)
         self.assertEqual(config.FrozenConstants().same_phase_gamma, psd_editor.SAME_PHASE_GAMMA)
+        self.assertEqual(
+            config.FrozenConstants().reference_scale_profile, psd_editor.REFERENCE_SCALE_PROFILE
+        )
 
 
 class FrozenConstantOverrideRejectionTests(unittest.TestCase):
@@ -52,6 +58,13 @@ class FrozenConstantOverrideRejectionTests(unittest.TestCase):
             with self.assertRaisesRegex(config.ConfigError, "frozen constant"):
                 config.load_config(path)
 
+    def test_reference_scale_profile_override_attempt_is_rejected(self):
+        raw = {**MINIMAL_RAW, "psd": {"reference_scale_profile": "legacy"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_config(Path(tmp), raw)
+            with self.assertRaisesRegex(config.ConfigError, "frozen constant"):
+                config.load_config(path)
+
 
 class FrozenConstantProvenanceTests(unittest.TestCase):
     def test_resolved_config_echoes_both_frozen_values_regardless_of_yaml_content(self):
@@ -60,6 +73,7 @@ class FrozenConstantProvenanceTests(unittest.TestCase):
             loaded = config.load_config(path)
             self.assertEqual(loaded.frozen.same_phase_alpha, 0.9)
             self.assertEqual(loaded.frozen.same_phase_gamma, 0.05)
+            self.assertEqual(loaded.frozen.reference_scale_profile, "expected_unit_rms_rfft_v1")
 
     def test_provenance_dict_echoes_both_frozen_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -68,6 +82,7 @@ class FrozenConstantProvenanceTests(unittest.TestCase):
             provenance = loaded.provenance()
             self.assertEqual(provenance["same_phase_alpha"], 0.9)
             self.assertEqual(provenance["same_phase_gamma"], 0.05)
+            self.assertEqual(provenance["reference_scale_profile"], "expected_unit_rms_rfft_v1")
 
 
 if __name__ == "__main__":

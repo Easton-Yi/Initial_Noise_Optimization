@@ -22,7 +22,10 @@ BASIS_DIM = PATCH_SIZE * PATCH_SIZE * CHANNELS  # 100, matches PC_GROUPS
 RAW_CONFIG = {
     "run": {"name": "runner_test", "master_seed": 42, "outputs_root": "outputs"},
     "model": {"adapter": "sdxl_turbo", "checkpoint": "org/sdxl-turbo-fake", "dtype": "float32", "device": "cpu", "cpu_offload": False},
-    "generation": {"height": 16, "width": 16, "num_inference_steps": 1, "guidance_scale": 0.0, "generation_batch_size": 1},
+    # CPU fixture: image-space dimensions remain distinct from latent-space
+    # dimensions (64 / VAE scale 8 = 8), while staying small enough for the
+    # full suite. Production's 512 -> 64 contract has a dedicated regression.
+    "generation": {"height": 64, "width": 64, "num_inference_steps": 1, "guidance_scale": 0.0, "generation_batch_size": 1},
     "basis": {
         "patch_size": PATCH_SIZE, "channels": CHANNELS, "patches_per_image": 8,
         "sampling_seed": 1, "split_seed": 2, "basis_output_path": "basis.pt",
@@ -90,6 +93,8 @@ def freeze_selected_calibration(loaded: config.PCASpecificPSDConfig, *, group_id
 class _FakePipeline:
     def __init__(self):
         self.received_generators: list[torch.Generator | None] = []
+        self.vae_scale_factor = 8
+        self.last_call_kwargs = None
 
     def prepare_latents(self, batch_size, latents=None):
         self.received = latents
@@ -98,6 +103,7 @@ class _FakePipeline:
     def __call__(self, *, latents, generator=None, **kwargs):
         self.prepare_latents(1, latents=latents)
         self.received_generators.append(generator)
+        self.last_call_kwargs = kwargs
         return SimpleNamespace(images=[Image.new("RGB", (2, 2))])
 
 

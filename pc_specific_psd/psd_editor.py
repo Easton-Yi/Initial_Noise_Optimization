@@ -11,16 +11,21 @@ reconstructs via ``OverlapCodec.decode_center`` (Center() synthesis, not
 overlap-add). Output-PSD calibration (the c_{B,tau}(b) correction factor) is
 a separate, later step -- see calibration.py -- and is not applied here.
 
-Frozen same-phase reference (plan section 5.1/section 14): the reference
+Frozen same-phase reference (plan section 5.1/section 14): the raw reference
 amplitude response
 
     h_ref(r) = sqrt((1 - gamma) * H_alpha(r)**2 + gamma),  H_alpha(r) = (1+r)**(-alpha)
 
-reuses noise_init's own same-phase white-floor construction exactly, at
-SAME_PHASE_ALPHA=0.9 / SAME_PHASE_GAMMA=0.05. These are module-level
-constants, not config fields -- config.py must reject any override attempt
-(tests/test_frozen_reference.py) -- and resolve_config() must still echo them
-into resolved config/provenance for transparency.
+reuses noise_init's own same-phase white-floor construction at
+SAME_PHASE_ALPHA=0.9 / SAME_PHASE_GAMMA=0.05. The public response multiplies
+that raw response by one deterministic analytic scalar: the reciprocal of its
+expected RMS under unit white input. The expectation uses Parseval's theorem
+with the rfft2 half-spectrum's conjugate-column weights (1 for DC and the
+even-width Nyquist column, 2 otherwise) and denominator H*W. This restores
+expected unit latent RMS without any realization-dependent normalization, so
+the operator remains linear, Gaussian-preserving, and phase-preserving. The
+parameters and scale profile are module-level constants, not config fields --
+config.py must reject override attempts and echo them into provenance.
 
 Frequency axis: h_ref(r) and the gate w(r) are both evaluated on the same
 integer-FFT-bin radius grid used by noise_init.radial_frequency_grid (fy =
@@ -36,9 +41,10 @@ to every coefficient map. Because OverlapCodec's encode/decode_center round
 trip is the identity for an all-ones filter (project_all_ones_is_identity_check),
 a uniform frequency-domain filter commutes through that round trip, and
 applying h_ref(r) to every coefficient map is therefore exactly equivalent to
-applying h_ref(r) directly to the raw latent -- i.e. bit-for-bit
-noise_init.same_phase_floor(base_white, 0.9, 0.05). ``apply_psd_edit_tau_zero``
-is that exact scalar shortcut, used for production tau=0 runs so calibration
+applying h_ref(r) directly to the raw latent -- i.e.
+noise_init.same_phase_floor(base_white, 0.9, 0.05) times the same analytic
+expected-unit-RMS scale. ``apply_psd_edit_tau_zero`` is that scalar shortcut,
+used for production tau=0 runs so calibration
 sampling error can never manufacture a spurious nonzero intensity difference
 at the identity point. tests/test_psd_editor.py separately forces the full
 general codec path (``apply_psd_edit(..., reference=True)``) at tau=0 and
@@ -47,6 +53,7 @@ torch.allclose, not bitwise equality.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Sequence
 
 import torch
@@ -57,6 +64,7 @@ from pc_specific_psd.patch_codec import OverlapCodec
 
 SAME_PHASE_ALPHA = 0.9
 SAME_PHASE_GAMMA = 0.05
+REFERENCE_SCALE_PROFILE = "expected_unit_rms_rfft_v1"
 
 
 def base_white_for_draw(block: manifests.SeedBlock, base_index: int, *, channels: int, height: int, width: int) -> torch.Tensor:
@@ -80,14 +88,76 @@ def base_white_for_draw(block: manifests.SeedBlock, base_index: int, *, channels
     return batch.base_white
 
 
-def reference_amplitude_response(height: int, width: int, *, device: torch.device | str = "cpu") -> torch.Tensor:
-    """h_ref(r) = sqrt((1 - gamma) * H_alpha(r)^2 + gamma), shape (H, W//2+1).
+def _raw_reference_amplitude_response(
+    height: int,
+    width: int,
+    *,
+    alpha: float = SAME_PHASE_ALPHA,
+    gamma: float = SAME_PHASE_GAMMA,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    """Unscaled same-phase amplitude response, shape ``(H, W//2+1)``."""
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0, 1]")
+    h_alpha = pink_filter(height, width, alpha, device=device)
+    return torch.sqrt((1.0 - gamma) * h_alpha.square() + gamma)
 
-    Identical to the multiplier noise_init.same_phase_floor applies to
-    base_white internally, evaluated at the frozen SAME_PHASE_ALPHA/GAMMA.
+
+def _rfft_conjugate_column_weights(width: int, *, device: torch.device | str = "cpu") -> torch.Tensor:
+    """Multiplicity of each rfft2 column in the omitted full spectrum."""
+    weights = torch.full((width // 2 + 1,), 2.0, dtype=torch.float32, device=device)
+    weights[0] = 1.0
+    if width % 2 == 0:
+        weights[-1] = 1.0
+    return weights
+
+
+@lru_cache(maxsize=None)
+def reference_expected_rms_multiplier(
+    height: int,
+    width: int,
+    alpha: float = SAME_PHASE_ALPHA,
+    gamma: float = SAME_PHASE_GAMMA,
+) -> float:
+    """Expected output RMS for unit white input under the unscaled response.
+
+    For torch's default FFT normalization, Parseval gives
+    ``E[RMS^2] = sum_full_spectrum(|h|^2) / (height * width)``.  Since only
+    the rfft2 half-spectrum is stored, the omitted conjugate columns are
+    restored with weights 1/2/1 for DC/interior/Nyquist respectively.  All
+    rows are already present, so no row weighting is needed.
+
+    This size-only scalar is intentionally computed on CPU and cached.  It is
+    applied as a Python scalar so callers' tensor dtype and device are
+    unchanged and no latent is moved between devices.
     """
-    h_alpha = pink_filter(height, width, SAME_PHASE_ALPHA, device=device)
-    return torch.sqrt((1.0 - SAME_PHASE_GAMMA) * h_alpha.square() + SAME_PHASE_GAMMA)
+    raw = _raw_reference_amplitude_response(height, width, alpha=alpha, gamma=gamma)
+    weights = _rfft_conjugate_column_weights(width)
+    mean_square = (raw.square() * weights.view(1, -1)).sum() / float(height * width)
+    return float(mean_square.sqrt())
+
+
+def reference_expected_unit_rms_scale(
+    height: int,
+    width: int,
+    alpha: float = SAME_PHASE_ALPHA,
+    gamma: float = SAME_PHASE_GAMMA,
+) -> float:
+    """Fixed analytic scale making the reference's expected RMS equal one."""
+    multiplier = reference_expected_rms_multiplier(height, width, alpha, gamma)
+    if multiplier <= 0.0:
+        raise ValueError("reference expected RMS multiplier must be positive")
+    return 1.0 / multiplier
+
+
+def reference_amplitude_response(height: int, width: int, *, device: torch.device | str = "cpu") -> torch.Tensor:
+    """Expected-unit-RMS frozen reference response, shape ``(H, W//2+1)``.
+
+    The response's relative spectrum is identical to ``same_phase_floor``;
+    only one deterministic size-dependent scalar is added.
+    """
+    raw = _raw_reference_amplitude_response(height, width, device=device)
+    return raw * reference_expected_unit_rms_scale(height, width)
 
 
 def low_frequency_gate(height: int, width: int, r_s: float, beta: float, *, device: torch.device | str = "cpu") -> torch.Tensor:
@@ -151,9 +221,11 @@ def apply_psd_edit(
 def apply_psd_edit_tau_zero(base_white: torch.Tensor) -> torch.Tensor:
     """Exact scalar-reference shortcut for tau=0 production runs.
 
-    Bit-for-bit ``noise_init.same_phase_floor(base_white, 0.9, 0.05)`` -- see
-    the module docstring for why this equals the general codec path at
-    tau=0, and tests/test_psd_editor.py for the equivalence check that
-    verifies it directly rather than only by argument.
+    Exactly ``same_phase_floor(base_white, 0.9, 0.05)`` times the analytic
+    expected-unit-RMS scale for the input's spatial size.  The fixed scalar
+    preserves the input tensor's dtype/device and keeps the shortcut equal to
+    the general codec path at tau=0.
     """
-    return same_phase_floor(base_white, SAME_PHASE_ALPHA, SAME_PHASE_GAMMA)
+    height, width = base_white.shape[-2:]
+    scale = reference_expected_unit_rms_scale(height, width)
+    return same_phase_floor(base_white, SAME_PHASE_ALPHA, SAME_PHASE_GAMMA) * scale

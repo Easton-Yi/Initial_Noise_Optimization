@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -18,12 +19,58 @@ class FrozenConstantsTests(unittest.TestCase):
     def test_exact_values(self):
         self.assertEqual(psd_editor.SAME_PHASE_ALPHA, 0.9)
         self.assertEqual(psd_editor.SAME_PHASE_GAMMA, 0.05)
+        self.assertEqual(psd_editor.REFERENCE_SCALE_PROFILE, "expected_unit_rms_rfft_v1")
+
+
+class ReferenceExpectedRmsScaleTests(unittest.TestCase):
+    def test_64_square_raw_multiplier_matches_frozen_expectation(self):
+        self.assertAlmostEqual(
+            psd_editor.reference_expected_rms_multiplier(64, 64),
+            0.2367667109,
+            places=9,
+        )
+
+    def test_64_square_scale_matches_frozen_expectation(self):
+        self.assertAlmostEqual(
+            psd_editor.reference_expected_unit_rms_scale(64, 64),
+            4.2235667177,
+            places=8,
+        )
+
+    def test_scaled_response_has_unit_weighted_energy_for_even_and_odd_sizes(self):
+        for height, width in ((64, 64), (63, 65), (64, 65)):
+            with self.subTest(height=height, width=width):
+                response = psd_editor.reference_amplitude_response(height, width)
+                weights = torch.full((width // 2 + 1,), 2.0, dtype=response.dtype)
+                weights[0] = 1.0
+                if width % 2 == 0:
+                    weights[-1] = 1.0
+                mean_square = (response.square() * weights.view(1, -1)).sum() / (height * width)
+                self.assertAlmostEqual(float(mean_square), 1.0, places=5)
+
+    def test_odd_width_last_rfft_column_has_conjugate_weight_two(self):
+        height, width = 7, 9
+        raw = psd_editor._raw_reference_amplitude_response(height, width)
+        weights = torch.full((width // 2 + 1,), 2.0)
+        weights[0] = 1.0
+        expected = float(((raw.square() * weights).sum() / (height * width)).sqrt())
+        self.assertAlmostEqual(
+            psd_editor.reference_expected_rms_multiplier(height, width), expected, places=7
+        )
+
+    def test_scale_is_applied_once_not_squared(self):
+        raw = psd_editor._raw_reference_amplitude_response(8, 10)
+        with patch.object(psd_editor, "reference_expected_unit_rms_scale", return_value=2.0):
+            actual = psd_editor.reference_amplitude_response(8, 10)
+        torch.testing.assert_close(actual, raw * 2.0)
 
 
 class ReferenceAmplitudeResponseTests(unittest.TestCase):
-    def test_dc_is_exactly_one(self):
+    def test_dc_is_exactly_the_analytic_scale(self):
         h_ref = psd_editor.reference_amplitude_response(8, 8)
-        self.assertAlmostEqual(float(h_ref[0, 0]), 1.0, places=6)
+        self.assertAlmostEqual(
+            float(h_ref[0, 0]), psd_editor.reference_expected_unit_rms_scale(8, 8), places=6
+        )
 
     def test_matches_same_phase_floor_internal_multiplier(self):
         # Applying h_ref(r) directly to a random tensor's rfft must reproduce
@@ -33,8 +80,24 @@ class ReferenceAmplitudeResponseTests(unittest.TestCase):
         base_white = torch.randn(2, 4, 8, 10)
         h_ref = psd_editor.reference_amplitude_response(8, 10)
         direct = torch.fft.irfft2(torch.fft.rfft2(base_white, dim=(-2, -1)) * h_ref, s=(8, 10), dim=(-2, -1))
-        expected = same_phase_floor(base_white, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA)
+        expected = same_phase_floor(
+            base_white, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA
+        ) * psd_editor.reference_expected_unit_rms_scale(8, 10)
         torch.testing.assert_close(direct, expected, atol=1e-5, rtol=1e-5)
+
+    def test_preserves_input_dtype_and_device(self):
+        base_white = torch.randn(1, 2, 8, 10, dtype=torch.float32)
+        edited = psd_editor.apply_psd_edit_tau_zero(base_white)
+        self.assertEqual(edited.dtype, base_white.dtype)
+        self.assertEqual(edited.device, base_white.device)
+
+    def test_reference_monte_carlo_rms_is_close_to_one(self):
+        generator = torch.Generator().manual_seed(20260921)
+        bank = torch.randn((256, 1, 64, 64), generator=generator)
+        reference = psd_editor.apply_psd_edit_tau_zero(bank)
+        rms = float(reference.to(torch.float64).square().mean().sqrt())
+        self.assertGreaterEqual(rms, 0.97)
+        self.assertLessEqual(rms, 1.03)
 
     def test_monotonically_non_increasing_along_first_row(self):
         h_ref = psd_editor.reference_amplitude_response(16, 16)
@@ -91,7 +154,9 @@ class ApplyPsdEditTauZeroTests(unittest.TestCase):
 
     def test_vectorized_path_matches_same_phase_floor(self):
         edited = psd_editor.apply_psd_edit(self.codec, self.latents, group_indices=[0, 1], tau=0.0, r_s=2.0, beta=2.0)
-        expected = same_phase_floor(self.latents, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA)
+        expected = same_phase_floor(
+            self.latents, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA
+        ) * psd_editor.reference_expected_unit_rms_scale(8, 8)
         torch.testing.assert_close(edited, expected, atol=1e-4, rtol=1e-4)
 
     def test_forced_full_codec_path_matches_shortcut_and_reference(self):
@@ -101,10 +166,12 @@ class ApplyPsdEditTauZeroTests(unittest.TestCase):
         forced = psd_editor.apply_psd_edit(self.codec, self.latents, group_indices=[2], tau=0.0, r_s=3.0, beta=1.5, reference=True)
         vectorized = psd_editor.apply_psd_edit(self.codec, self.latents, group_indices=[2], tau=0.0, r_s=3.0, beta=1.5, reference=False)
         shortcut = psd_editor.apply_psd_edit_tau_zero(self.latents)
-        unmodified_reference = same_phase_floor(self.latents, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA)
+        scaled_reference = same_phase_floor(
+            self.latents, psd_editor.SAME_PHASE_ALPHA, psd_editor.SAME_PHASE_GAMMA
+        ) * psd_editor.reference_expected_unit_rms_scale(8, 8)
         torch.testing.assert_close(forced, vectorized, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(forced, shortcut, atol=1e-4, rtol=1e-4)
-        torch.testing.assert_close(forced, unmodified_reference, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(forced, scaled_reference, atol=1e-4, rtol=1e-4)
 
     def test_tau_zero_result_independent_of_group_choice(self):
         # t_B(r; 0) == 1 regardless of which group is named, so the edit must
@@ -114,8 +181,15 @@ class ApplyPsdEditTauZeroTests(unittest.TestCase):
         torch.testing.assert_close(edited_a, edited_b, atol=1e-5, rtol=1e-5)
 
     def test_apply_psd_edit_tau_zero_delegates_to_same_phase_floor(self):
-        expected = same_phase_floor(self.latents, 0.9, 0.05)
+        expected = same_phase_floor(self.latents, 0.9, 0.05) \
+            * psd_editor.reference_expected_unit_rms_scale(8, 8)
         torch.testing.assert_close(psd_editor.apply_psd_edit_tau_zero(self.latents), expected)
+
+    def test_shortcut_applies_scale_once_not_twice(self):
+        raw = same_phase_floor(self.latents, 0.9, 0.05)
+        with patch.object(psd_editor, "reference_expected_unit_rms_scale", return_value=2.0):
+            actual = psd_editor.apply_psd_edit_tau_zero(self.latents)
+        torch.testing.assert_close(actual, raw * 2.0)
 
 
 class ApplyPsdEditGeneralPathTests(unittest.TestCase):

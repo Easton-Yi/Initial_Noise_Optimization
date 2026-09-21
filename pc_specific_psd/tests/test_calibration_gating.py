@@ -42,13 +42,22 @@ def _write_config(tmp_path: Path, raw: dict) -> Path:
     return path
 
 
-def _write_calibration_result(tmp_path: Path, relative: str, *, status: str, group_ids: list[str]) -> None:
+def _write_calibration_result(
+    tmp_path: Path,
+    relative: str,
+    *,
+    status: str,
+    group_ids: list[str],
+    include_reference_scale_profile: bool = True,
+) -> None:
     payload = {
         "status": status,
         "gate": {"r_s": 0.2, "beta": 6.0},
         "protocol": "operator_clean",
         "group_selections": {group_id: {"tau_plus": 1.0, "tau_minus": -1.0} for group_id in group_ids},
     }
+    if include_reference_scale_profile:
+        payload["reference_scale_profile"] = "expected_unit_rms_rfft_v1"
     (tmp_path / relative).write_text(json.dumps(payload))
 
 
@@ -152,6 +161,27 @@ class FullTierCommandsTests(unittest.TestCase):
             for command in self.FULL_COMMANDS:
                 config.resolve_config(path, command)  # must not raise
 
+    def test_full_tier_recognizes_legacy_registry_as_stale_and_requires_recalibration(self):
+        raw = {**BASE_RAW, "probing": {"rho": 0.10}, "psd": DECLARED_PSD}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            path = _write_config(tmp_path, raw)
+            _write_calibration_result(
+                tmp_path,
+                DECLARED_PSD["calibration_result_path"],
+                status="SELECTED",
+                group_ids=["B5"],
+                include_reference_scale_profile=False,
+            )
+            legacy = config.load_calibration_registry(config.load_config(path))
+            self.assertTrue(legacy.loaded)
+            self.assertIsNone(legacy.reference_scale_profile)
+            with self.assertRaises(config.ConfigValidationError) as ctx:
+                config.resolve_config(path, "generate-psd")
+            message = " ".join(ctx.exception.missing_fields)
+            self.assertIn("reference_scale_profile", message)
+            self.assertIn("calibrate", message)
+
 
 class CalibrationRegistryRoundTripTests(unittest.TestCase):
     def test_write_calibration_registry_round_trips_through_load(self):
@@ -170,6 +200,7 @@ class CalibrationRegistryRoundTripTests(unittest.TestCase):
             self.assertTrue(registry.loaded)
             self.assertEqual(registry.status, "SELECTED")
             self.assertEqual(registry.gate, config.GateCandidateConfig(r_s=0.2, beta=6.0))
+            self.assertEqual(registry.reference_scale_profile, "expected_unit_rms_rfft_v1")
             self.assertEqual(registry.group_taus, {"B5": (1.0, -1.0)})
 
 

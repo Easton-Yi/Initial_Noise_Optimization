@@ -13,9 +13,10 @@ the per-command gating instead.
 Six PC groups (``manifests.PC_GROUPS``) are fixed pipeline constants, not a
 config field -- this module only validates the basis dimension is consistent
 with them, never accepts an override. ``psd_editor.SAME_PHASE_ALPHA``/
-``SAME_PHASE_GAMMA`` are likewise frozen constants: any YAML attempt to set
-them under ``psd:`` is rejected, and ``FrozenConstants`` echoes their real
-values into every resolved config for provenance instead.
+``SAME_PHASE_GAMMA`` and ``REFERENCE_SCALE_PROFILE`` are likewise frozen
+constants: any YAML attempt to set them under ``psd:`` is rejected, and
+``FrozenConstants`` echoes their real values into every resolved config for
+provenance instead.
 
 The ``needs_calibration`` PSD/gate registry is two layers, matching the plan's
 strict calibration-bank-tunes / validation-bank-accepts-once split:
@@ -41,7 +42,7 @@ from pc_specific_psd.compat_generation import GenerationConfig
 
 Protocol = Literal["legacy_matched", "operator_clean"]
 
-_FROZEN_PSD_KEYS = ("same_phase_alpha", "same_phase_gamma")
+_FROZEN_PSD_KEYS = ("same_phase_alpha", "same_phase_gamma", "reference_scale_profile")
 
 _GENERATION_REQUIRED_FIELDS = ("height", "width", "num_inference_steps", "guidance_scale", "generation_batch_size")
 _GENERATION_ALLOWED_FIELDS = frozenset(_GENERATION_REQUIRED_FIELDS) | {"output_format"}
@@ -176,6 +177,7 @@ class PSDConfig:
 class FrozenConstants:
     same_phase_alpha: float = psd_editor.SAME_PHASE_ALPHA
     same_phase_gamma: float = psd_editor.SAME_PHASE_GAMMA
+    reference_scale_profile: str = psd_editor.REFERENCE_SCALE_PROFILE
 
 
 @dataclass(frozen=True)
@@ -203,6 +205,7 @@ class PCASpecificPSDConfig:
             "config_path": str(self.config_path),
             "same_phase_alpha": self.frozen.same_phase_alpha,
             "same_phase_gamma": self.frozen.same_phase_gamma,
+            "reference_scale_profile": self.frozen.reference_scale_profile,
         }
 
 
@@ -258,8 +261,8 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
     for key in _FROZEN_PSD_KEYS:
         if key in raw_psd:
             raise ConfigError(
-                f"config.psd.{key} is a frozen constant (psd_editor.SAME_PHASE_ALPHA/"
-                f"SAME_PHASE_GAMMA) and cannot be set from config"
+                f"config.psd.{key} is a frozen constant "
+                f"(same-phase reference parameters/profile) and cannot be set from config"
             )
     gate_candidates = tuple(GateCandidateConfig(r_s=g["r_s"], beta=g["beta"]) for g in raw_psd.get("gate_candidates", []))
     groups = tuple(
@@ -340,10 +343,13 @@ class CalibrationRegistry:
     status: str | None
     gate: GateCandidateConfig | None
     protocol: Protocol | None
+    reference_scale_profile: str | None
     group_taus: dict[str, tuple[float, float]]  # group_id -> (tau_plus, tau_minus)
 
 
-_EMPTY_REGISTRY = CalibrationRegistry(loaded=False, status=None, gate=None, protocol=None, group_taus={})
+_EMPTY_REGISTRY = CalibrationRegistry(
+    loaded=False, status=None, gate=None, protocol=None, reference_scale_profile=None, group_taus={}
+)
 
 
 def load_calibration_registry(config: PCASpecificPSDConfig) -> CalibrationRegistry:
@@ -358,7 +364,12 @@ def load_calibration_registry(config: PCASpecificPSDConfig) -> CalibrationRegist
         for group_id, selection in payload.get("group_selections", {}).items()
     }
     return CalibrationRegistry(
-        loaded=True, status=payload.get("status"), gate=gate, protocol=payload.get("protocol"), group_taus=group_taus
+        loaded=True,
+        status=payload.get("status"),
+        gate=gate,
+        protocol=payload.get("protocol"),
+        reference_scale_profile=payload.get("reference_scale_profile"),
+        group_taus=group_taus,
     )
 
 
@@ -381,6 +392,7 @@ def write_calibration_registry(
         "status": status,
         "gate": {"r_s": gate.r_s, "beta": gate.beta} if gate is not None else None,
         "protocol": protocol,
+        "reference_scale_profile": config.frozen.reference_scale_profile,
         "group_selections": {
             group_id: {"tau_plus": tau_plus, "tau_minus": tau_minus}
             for group_id, (tau_plus, tau_minus) in group_taus.items()
@@ -446,6 +458,12 @@ def _full_tier_missing(config: PCASpecificPSDConfig, candidate_group_ids: Sequen
         return [f"calibration_result at {resolved} does not exist -- run `calibrate` first"]
     if registry.status != "SELECTED":
         return [f"calibration_result status is {registry.status!r} (expected 'SELECTED') -- run `calibrate` again"]
+    if registry.reference_scale_profile != config.frozen.reference_scale_profile:
+        return [
+            "calibration_result reference_scale_profile is "
+            f"{registry.reference_scale_profile!r} (expected {config.frozen.reference_scale_profile!r}); "
+            "the registry is stale -- run `calibrate` again"
+        ]
     groups = (
         config.psd.groups if candidate_group_ids is None
         else [group for group in config.psd.groups if group.group_id in candidate_group_ids]

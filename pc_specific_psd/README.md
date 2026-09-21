@@ -406,8 +406,19 @@ round: the `workflow` orchestrator's full 14-stage state machine end-to-end
 (both review stops and their incomplete/complete/conflict handling, both
 no-candidates/no-approved-conditions terminal states, the reference-excluded
 hard stop, the calibration-independent smoke check with its
-`(config_hash, basis_hash)` cache, and cross-venv dispatch — all exercised
+`(config_hash, basis_hash, reference_scale_profile)` cache, and cross-venv dispatch — all exercised
 with a fake adapter/metric runner standing in for real model calls).
+
+The frozen same-phase reference remains α=0.9, γ=0.05, but
+`operator_clean` now applies the analytic `expected_unit_rms_rfft_v1` scale
+to both reference and candidates exactly once. It derives expected RMS from
+the rFFT response using Hermitian column weights (DC/Nyquist 1, interior 2)
+and `height * width` normalization. Because this is a fixed size-dependent
+scalar rather than per-sample normalization, the operator stays linear,
+Gaussian, phase-preserving, and spectrally shape-preserving. Calibration
+registries and smoke-cache entries created without this profile are stale and
+must be regenerated. This change does not alter the separate size contract:
+SDXL-Turbo still produces 512×512 images from 4×64×64 initial latents.
 
 **Not run** in this pass, and requiring resources outside this sandbox:
 

@@ -30,8 +30,9 @@ module reconstructs that bank once per run and recomputes each
 ``(group_id, sign)`` correction exactly once (there are at most 4 -- one per
 candidate group's tau+/tau-), caching the result rather than recomputing per
 image. The reference condition never needs this: it uses
-``psd_editor.apply_psd_edit_tau_zero`` directly, which is bit-for-bit
-``same_phase_floor`` and carries an implicit all-ones correction by
+``psd_editor.apply_psd_edit_tau_zero`` directly, which is
+``same_phase_floor`` times the frozen analytic expected-unit-RMS scale and
+carries an implicit all-ones correction by
 definition (``calibration.zero_tau_correction``), so no calibration-bank
 reconstruction is required for it at all.
 """
@@ -137,6 +138,12 @@ def build_frozen_corrections(
     registry = load_calibration_registry(config)
     if not registry.loaded or registry.status != "SELECTED" or registry.gate is None:
         raise RunnerError("calibration registry is not SELECTED; run calibrate first")
+    if registry.reference_scale_profile != config.frozen.reference_scale_profile:
+        raise RunnerError(
+            "calibration registry uses reference_scale_profile "
+            f"{registry.reference_scale_profile!r}, expected {config.frozen.reference_scale_profile!r}; "
+            "it is stale and must be regenerated -- run calibrate again"
+        )
     bank = _calibration_bank(config, height=height, width=width)
     reference_power = calibration.compute_reference_power(bank, config.psd.num_bins, protocol=registry.protocol)
 
@@ -229,6 +236,7 @@ def _run_provenance(config: PCASpecificPSDConfig, basis_hash: str, calibration_h
         },
         "basis_hash": basis_hash,
         "calibration_hash": calibration_hash,
+        "reference_scale_profile": config.frozen.reference_scale_profile,
     }
 
 
