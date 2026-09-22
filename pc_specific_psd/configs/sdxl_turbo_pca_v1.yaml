@@ -1,22 +1,8 @@
 # Production config for the PCA-specific PSD study (SDXL-Turbo), first pass.
 #
-# `run`/`model`/`generation` reuse noise_init/configs/sdxl_turbo_full.yaml's
-# values by value (not by reference -- this package never reads that file at
-# runtime, see pc_specific_psd/docs/IMPLEMENTATION_DECISIONS.md). Source file
-# sha256 at the time of copying:
-#   99880bda712dc331e3dfe4ad117dfe6fcc00377dd54f4eb53636efb6704d6b50
-#
-# `basis.dataset_manifest_path` is deliberately left unset: this pass does not
-# have a local image dataset, so real basis construction is NOT_RUN until a
-# dataset manifest path is supplied (see IMPLEMENTATION_REPORT.md). Every
-# `psd.*` field is a finite, pre-declared candidate set per plan section 5.4 --
-# `calibrate` selects from these candidates and freezes its selection into
-# `psd.calibration_result_path`; nothing here is a measured/tuned value yet.
-# `psd.groups` declares all six PC groups (manifests.PC_GROUPS) up front,
-# since which 1-2 groups become real candidates is only known after probing
-# and human annotation (deferred to the GPU machine) -- see
-# IMPLEMENTATION_DECISIONS.md for why the config does not wait for that
-# result before being considered "complete".
+# PCA basis uses the prepared COCO 2017 subset of 2,000 images.
+# PSD parameters below are pre-declared candidates, not measured results.
+# Calibration selects and freezes parameters after probing and human review.
 
 run:
   name: sdxl_turbo_pca_v1
