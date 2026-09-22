@@ -29,6 +29,7 @@ from pc_specific_psd import (
     analysis,
     basis as basis_module,
     calibration,
+    calibration_v2,
     config,
     manifests,
     metrics,
@@ -38,7 +39,7 @@ from pc_specific_psd import (
     workflow,
 )
 from pc_specific_psd.adapters import SDXLTurboAdapterPCA
-from pc_specific_psd.compat_generation import read_json, write_json
+from pc_specific_psd.compat_generation import file_hash, read_json, write_json
 
 
 class CliError(RuntimeError):
@@ -177,6 +178,7 @@ def _cmd_build_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace)
         patches_per_image=cfg.basis.patches_per_image, sampling_seed=cfg.basis.sampling_seed,
         split_seed=cfg.basis.split_seed, synthetic=False,
         num_leading_components=cfg.basis.num_leading_components,
+        bands={group.group_id: tuple(group.indices) for group in manifests.PC_GROUPS},
     )
     basis_module.save_basis(built, output_path)
     if cfg.generation.release_model_after_generation:
@@ -186,7 +188,7 @@ def _cmd_build_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace)
         "basis_output_path": str(output_path),
         "num_samples": built.num_samples,
         "orthogonality_error": basis_module.orthogonality_error(built.components),
-        "split_half_max_angle_leading": stability.max_angle_leading,
+        "split_half_stability": _jsonable(stability),
     }
 
 
@@ -220,6 +222,51 @@ def _cmd_inspect_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespac
         "orthogonality_error": basis_module.orthogonality_error(loaded.components),
         "group_frequency_centroids": group_centroids,
     }
+
+
+def _cmd_basis_stability(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    """Image-disjoint split-half diagnostic; never overwrites the formal basis."""
+    output_path = Path(args.output) if args.output else _default_path(cfg, "basis_stability_v2.json")
+    manifest_path = cfg.resolve_root(cfg.basis.dataset_manifest_path)
+    if args.dry_run:
+        return {
+            "status": "dry-run",
+            "manifest_path": str(manifest_path) if manifest_path else None,
+            "output_path": str(output_path),
+            "split_seed": cfg.basis.split_seed,
+            "note": "fits two diagnostic half-bases only; does not rebuild the formal basis",
+        }
+    if manifest_path is None or not manifest_path.exists():
+        raise CliError(f"dataset manifest not found: {manifest_path}")
+    manifest = basis_module.load_dataset_manifest(manifest_path)
+    adapter = SDXLTurboAdapterPCA(cfg.model.as_model_config_dict())
+    bands = {
+        group.group_id: tuple(group.indices)
+        for group in manifests.PC_GROUPS
+        if group.end_1based <= cfg.basis.channels * cfg.basis.patch_size * cfg.basis.patch_size
+    }
+    result = basis_module.split_half_stability(
+        manifest,
+        adapter.encode_images_for_basis,
+        patch_size=cfg.basis.patch_size,
+        channels=cfg.basis.channels,
+        patches_per_image=cfg.basis.patches_per_image,
+        sampling_seed=cfg.basis.sampling_seed,
+        split_seed=cfg.basis.split_seed,
+        synthetic=False,
+        num_leading_components=cfg.basis.num_leading_components or 32,
+        bands=bands,
+    )
+    if cfg.generation.release_model_after_generation:
+        adapter.close()
+    payload = {
+        "status": "ok",
+        "basis_output_path": str(cfg.resolve_root(cfg.basis.basis_output_path)),
+        "formal_basis_was_modified": False,
+        "result": _jsonable(result),
+    }
+    write_json(output_path, payload)
+    return {**payload, "output_path": str(output_path)}
 
 
 def _cmd_probe(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
@@ -310,6 +357,8 @@ def _cmd_select_candidates(cfg: config.PCASpecificPSDConfig, args: argparse.Name
 
 
 def _cmd_calibrate(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+        return _cmd_calibrate_effect_v2(cfg, args)
     height = cfg.generation.config.height // 8
     width = cfg.generation.config.width // 8
     candidate_group_ids = set(_read_candidates(cfg, args.candidates_file)) if args.candidates_file else None
@@ -388,6 +437,89 @@ def _cmd_calibrate(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -
     }
 
 
+def _cmd_calibrate_effect_v2(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    """Fit corrections on one bank and select independent tau values by final effect."""
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
+    if args.dry_run:
+        return {
+            "status": "dry-run",
+            "calibration_profile": config.EFFECT_CALIBRATION_PROFILE,
+            "fixed_gate": _jsonable(cfg.psd.gate_candidates[0]),
+            "groups": [group.group_id for group in cfg.psd.groups],
+            "targets": {group.group_id: list(group.target_relative_l2) for group in cfg.psd.groups},
+        }
+    codec = runner.load_codec(cfg, allow_synthetic=args.allow_synthetic_basis)
+    bank = _calibration_bank(cfg, height=height, width=width)
+    reference_power = calibration.compute_reference_power(bank, cfg.psd.num_bins, protocol=cfg.psd.protocol)
+    declared_gate = cfg.psd.gate_candidates[0]
+    gate = calibration.GateCandidate(r_s=declared_gate.r_s, beta=declared_gate.beta)
+    specs = [
+        calibration_v2.EffectGroupSpec(
+            group_id=group.group_id,
+            group_indices=tuple(manifests.pc_group_by_id(group.group_id).indices),
+            tau_plus_candidates=group.tau_plus_candidates,
+            tau_minus_candidates=group.tau_minus_candidates,
+            target_relative_l2=group.target_relative_l2,
+            effect_target_tolerance=group.effect_target_tolerance,
+        )
+        for group in cfg.psd.groups
+    ]
+    result = calibration_v2.select_effect_size_targets(
+        codec, bank, reference_power, gate, specs,
+        protocol=cfg.psd.protocol, num_bins=cfg.psd.num_bins,
+        psd_tolerance=cfg.psd.psd_tolerance,
+        correction_gain_bound=cfg.psd.correction_gain_bound,
+        condition_number_threshold=cfg.psd.condition_number_threshold,
+        minimum_covariance_distance=cfg.psd.minimum_covariance_distance,
+    )
+    conditions = _effect_condition_selections(result)
+    payload = {
+        "status": result.status,
+        "protocol": result.protocol,
+        "gate": _jsonable(result.gate),
+        "bank": {"role": "calibration", "seed": cfg.psd.calibration_bank_seed, "size": cfg.psd.calibration_bank_size},
+        "basis_hash": runner.basis_hash_for(cfg),
+        "config_hash": file_hash(cfg.config_path),
+        "config_path": str(cfg.config_path),
+        "selections": _jsonable(result.selections),
+        "candidate_diagnostics": _jsonable(result.candidate_diagnostics),
+        "tau_zero_diagnostics": _jsonable(result.tau_zero_diagnostics),
+        "condition_selections": conditions,
+        "all_targets_reached": result.all_targets_reached,
+        "unreachable_target_count": result.unreachable_target_count,
+    }
+    path = config.write_effect_calibration_registry(cfg, payload)
+    return {
+        "status": result.status,
+        "calibration_profile": result.profile,
+        "calibration_result_path": str(path),
+        "condition_ids": sorted(conditions),
+        "selections": _jsonable(result.selections),
+    }
+
+
+def _effect_condition_selections(result: calibration_v2.EffectCalibrationResult) -> dict[str, dict[str, Any]]:
+    """Freeze only reachable selections, deduplicating targets that share tau."""
+    conditions: dict[str, dict[str, Any]] = {}
+    for selection in result.selections:
+        if selection.status != "SELECTED" or selection.evaluation is None or selection.condition_id is None:
+            continue
+        diagnostic = selection.evaluation
+        condition = conditions.setdefault(selection.condition_id, {
+            "condition_id": selection.condition_id,
+            "group_id": selection.group_id,
+            "sign": selection.sign,
+            "tau": selection.selected_tau,
+            "actual_relative_l2": selection.actual_relative_l2,
+            "target_relative_l2": [],
+            "correction": _jsonable(diagnostic.correction),
+            "diagnostics": _jsonable(diagnostic),
+        })
+        condition["target_relative_l2"].append(selection.target_relative_l2)
+    return conditions
+
+
 def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     """Cache-only replay-and-check: reloads the frozen calibration registry
     and re-runs ``calibration.evaluate_candidate`` against a freshly
@@ -396,6 +528,8 @@ def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespa
     load, no new generation, mirroring ``noise_init/noise_validation.py``'s
     standalone pattern.
     """
+    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+        return _cmd_validate_noise_effect_v2(cfg, args)
     height = cfg.generation.config.height // 8
     width = cfg.generation.config.width // 8
     if args.dry_run:
@@ -413,7 +547,89 @@ def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespa
     }
 
 
+def _cmd_validate_noise_effect_v2(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    """Evaluate the frozen v2 operators once on the disjoint validation bank."""
+    output_path = cfg.resolve_root(cfg.psd.validation_result_path)
+    if args.dry_run:
+        return {
+            "status": "dry-run", "output_path": str(output_path),
+            "bank_seed": cfg.psd.validation_bank_seed, "bank_size": cfg.psd.validation_bank_size,
+        }
+    registry_path = cfg.resolve_root(cfg.psd.calibration_result_path)
+    payload = read_json(registry_path)
+    if payload.get("status") != "SELECTED" or payload.get("calibration_profile") != config.EFFECT_CALIBRATION_PROFILE:
+        raise CliError("effect_size_v2 calibration registry is not SELECTED")
+    current_config_hash = file_hash(cfg.config_path)
+    if payload.get("config_hash") != current_config_hash:
+        raise CliError("effect_size_v2 calibration registry is stale relative to the current config; run calibrate again")
+    codec = runner.load_codec(cfg, allow_synthetic=args.allow_synthetic_basis)
+    current_basis_hash = runner.basis_hash_for(cfg)
+    if payload.get("basis_hash") != current_basis_hash:
+        raise CliError("effect_size_v2 calibration registry is stale relative to the formal basis")
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
+    bank = _validation_bank(cfg, height=height, width=width)
+    gate = calibration.GateCandidate(**payload["gate"])
+    results: dict[str, Any] = {}
+    all_passed = True
+    for condition_id, frozen in payload["condition_selections"].items():
+        diagnostic = calibration_v2.diagnose_fixed_operator(
+            codec, bank, frozen["group_id"], tuple(manifests.pc_group_by_id(frozen["group_id"]).indices),
+            gate, float(frozen["tau"]), torch.tensor(frozen["correction"], dtype=torch.float64),
+            num_bins=cfg.psd.num_bins, psd_tolerance=cfg.psd.psd_tolerance,
+            correction_gain_bound=cfg.psd.correction_gain_bound,
+            condition_number_threshold=cfg.psd.condition_number_threshold,
+            minimum_covariance_distance=cfg.psd.minimum_covariance_distance,
+        )
+        target_checks = [
+            {
+                "target": float(target),
+                "tolerance": calibration_v2.target_tolerance(float(target), next(
+                    group.effect_target_tolerance for group in cfg.psd.groups if group.group_id == frozen["group_id"]
+                )),
+                "passed": abs(diagnostic.paired_relative_l2_final - float(target)) <= calibration_v2.target_tolerance(
+                    float(target), next(group.effect_target_tolerance for group in cfg.psd.groups if group.group_id == frozen["group_id"])
+                ),
+            }
+            for target in frozen["target_relative_l2"]
+        ]
+        passed = diagnostic.status == "accepted" and all(check["passed"] for check in target_checks)
+        all_passed = all_passed and passed
+        results[condition_id] = {"passed": passed, "target_checks": target_checks, "diagnostics": _jsonable(diagnostic)}
+    validation = {
+        "status": "PASS" if all_passed and results else "FAIL",
+        "calibration_profile": config.EFFECT_CALIBRATION_PROFILE,
+        "bank": {"role": "validation", "seed": cfg.psd.validation_bank_seed, "size": cfg.psd.validation_bank_size},
+        "calibration_result_path": str(registry_path),
+        "config_hash": current_config_hash,
+        "basis_hash": current_basis_hash,
+        "calibration_hash": file_hash(registry_path),
+        "conditions": results,
+    }
+    write_json(output_path, validation)
+    return {**validation, "output_path": str(output_path)}
+
+
 def _cmd_generate_psd(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+        if args.stage != "preview":
+            raise CliError(
+                "effect_size_v2 is limited to the development preview; freeze confirmatory primary "
+                "metrics and success criteria before enabling a full run"
+            )
+        registry = config.load_calibration_registry(cfg)
+        condition_ids = tuple(registry.condition_selections)
+        entries = manifests.build_effect_preview_manifest_entries(condition_ids)
+        if args.dry_run:
+            return {
+                "status": "dry-run", "stage": "preview", "condition_ids": list(condition_ids),
+                "image_count": len(entries), "maximum_image_count": 60,
+            }
+        run_dir = runner.generate_effect_preview(
+            cfg, condition_ids, run_id=args.run_id, force=args.force,
+            allow_synthetic_basis=args.allow_synthetic_basis,
+        )
+        return {"status": "ok", "stage": "preview", "run_dir": str(run_dir), "image_count": len(entries)}
     if args.dry_run:
         if args.stage == "full" and args.approved_conditions_file:
             approved_path = Path(args.approved_conditions_file)
@@ -458,6 +674,22 @@ def _cmd_generate_psd(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace
 def _cmd_export_preview_review(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     review_path = Path(args.review_output) if args.review_output else _default_path(cfg, "preview_review_template.json")
     mapping_path = Path(args.mapping_output) if args.mapping_output else _default_path(cfg, "preview_review_mapping.json")
+    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+        condition_ids = tuple(config.load_calibration_registry(cfg).condition_selections)
+        entries = manifests.build_effect_preview_manifest_entries(condition_ids)
+        grid_path = review_path.with_name(f"{cfg.run.name}_preview_grid.png")
+        if args.dry_run:
+            return {"status": "dry-run", "image_count": len(entries), "grid_path": str(grid_path)}
+        blind_rows, mapping = review.export_preview_review(entries)
+        write_json(review_path, list(blind_rows))
+        write_json(mapping_path, _jsonable(mapping))
+        run_dir = cfg.resolve_root(cfg.run.outputs_root) / (args.run_id or f"{cfg.run.name}_preview")
+        review.export_effect_preview_grid(run_dir, condition_ids, grid_path)
+        return {
+            "status": "ok", "review_template_path": str(review_path),
+            "mapping_path": str(mapping_path), "grid_path": str(grid_path),
+            "image_count": len(blind_rows),
+        }
     if args.dry_run:
         try:
             candidate_group_ids = _read_candidates(cfg, args.candidates_file)
@@ -583,6 +815,11 @@ def _cmd_analyze(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> 
 
 
 def _cmd_workflow(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+        raise CliError(
+            "workflow does not support effect_size_v2; run basis-stability, calibrate, "
+            "validate-noise, generate-psd --stage preview, and export-preview-review in order"
+        )
     return workflow.run_workflow(
         args.config,
         run_id=args.run_id,
@@ -602,6 +839,7 @@ _HANDLERS = {
     "validate-config": _cmd_validate_config,
     "build-basis": _cmd_build_basis,
     "inspect-basis": _cmd_inspect_basis,
+    "basis-stability": _cmd_basis_stability,
     "probe": _cmd_probe,
     "export-review": _cmd_export_review,
     "select-candidates": _cmd_select_candidates,
@@ -639,6 +877,8 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate-config", parents=[common])
     subparsers.add_parser("build-basis", parents=[common])
     subparsers.add_parser("inspect-basis", parents=[common, synthetic])
+    stability_parser = subparsers.add_parser("basis-stability", parents=[common])
+    stability_parser.add_argument("--output", default=None)
 
     probe_parser = subparsers.add_parser("probe", parents=[common, synthetic, force])
     followup_group = probe_parser.add_mutually_exclusive_group()

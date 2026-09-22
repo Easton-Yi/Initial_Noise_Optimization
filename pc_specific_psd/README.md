@@ -1,5 +1,16 @@
 # pc_specific_psd
 
+> **v2 effect-calibration path:** use
+> `configs/sdxl_turbo_pca_v2.yaml` and follow
+> `docs/PC_PSD_V2_DIAGNOSTIC_REPORT.md`. It fixes v1's RMS-based tau ranking,
+> adds final-operator covariance/band diagnostics and held-out validation, and
+> limits generation to the bounded development preview until confirmatory
+> metrics are pre-specified. Legacy v1 registries remain readable but cannot
+> satisfy v2 validation. The legacy `workflow` command intentionally refuses
+> v2; use the ordered standalone commands in the diagnostic report. V2
+> calibration and validation artifacts are hash-bound to the config, basis,
+> and each other; preview provenance additionally pins the validation hash.
+
 PCA-specific PSD noise-editing pipeline for SDXL-Turbo. Implements
 `docs/PCA-Specific-PSD-Editing-Plan.md` / `docs/PC-Specific-PSD-Implementation-Prompt.md`:
 build a shared PCA basis over clean SDXL-Turbo VAE latent patches, run a
@@ -77,7 +88,7 @@ needs (`config.COMMAND_TIERS`):
 
 | Tier | Commands | Requires |
 | --- | --- | --- |
-| `basis` | `validate-config`, `build-basis`, `inspect-basis`, `workflow` | `model`, `generation`, `basis` sections only |
+| `basis` | `validate-config`, `build-basis`, `inspect-basis`, `basis-stability`, `workflow` | `model`, `generation`, `basis` sections only |
 | `probing` | `probe`, `export-review`, `select-candidates` | + `probing.rho`, the PC group partition — **no** PSD/calibration field |
 | `calibration` | `calibrate`, `validate-noise` | + the calibration protocol/bank-size/candidate-list fields to be *declared* (not yet selected) |
 | `full` | `generate-psd`, `export-preview-review`, `ingest-preview-review`, `export-gallery-review`, `ingest-gallery-review`, `metrics`, `analyze` | + every declared PC group in `psd.groups` must already have a *frozen* τ selection (i.e. `calibrate` has run and written `psd.calibration_result_path`) |
@@ -232,6 +243,7 @@ or either compat shim's heavy dependencies).
 validate-config   --config CFG [--run-id ID] [--dry-run]
 build-basis       --config CFG [--run-id ID] [--dry-run]
 inspect-basis     --config CFG [--dry-run] [--allow-synthetic-basis]
+basis-stability   --config CFG [--dry-run] [--output PATH]
 
 probe             --config CFG [--dry-run] [--allow-synthetic-basis] [--force]
                   [--rho020-followup | --candidate-recheck]

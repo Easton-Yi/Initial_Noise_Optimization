@@ -56,6 +56,13 @@ class DryRunSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "ok")
 
+    def test_legacy_workflow_explicitly_rejects_effect_v2(self):
+        config_path = Path(__file__).parents[1] / "configs" / "sdxl_turbo_pca_v2.yaml"
+        code, _, _, err = _run(["workflow", "--config", str(config_path), "--dry-run"])
+        self.assertEqual(code, 1)
+        self.assertIn("workflow does not support effect_size_v2", err)
+        self.assertIn("basis-stability", err)
+
     def test_build_basis_dry_run_reports_missing_dataset_manifest(self):
         code, payload, _, _ = _run(["build-basis", "--config", self.config_path, "--dry-run"])
         self.assertEqual(code, 0)

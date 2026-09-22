@@ -99,7 +99,10 @@ def zero_tau_correction(num_bins: int) -> torch.Tensor:
 class RadialCorrection:
     correction: torch.Tensor    # (num_bins,) float64, 1.0 at invalid bins
     invalid_bins: torch.Tensor  # (num_bins,) bool
+    min_gain: float             # min positive amplitude correction over valid bins
     max_gain: float             # max(correction) over valid bins only (1.0 if none valid)
+    symmetric_factor: float     # max(max(c), 1/min(c)) over valid bins
+    has_invalid_values: bool    # non-finite or non-positive value in a valid bin
     exceeds_gain_bound: bool
 
 
@@ -124,8 +127,21 @@ def compute_radial_correction(
     raw_correction = (reference_power.clamp(min=0.0) / safe_measured).sqrt()
     correction = torch.where(invalid, torch.ones_like(raw_correction), raw_correction)
     valid_values = correction[~invalid]
-    max_gain = float(valid_values.max()) if valid_values.numel() > 0 else 1.0
-    return RadialCorrection(correction, invalid, max_gain, max_gain > max_gain_bound)
+    has_invalid_values = bool(
+        (~torch.isfinite(valid_values)).any() | (valid_values <= 0).any()
+    ) if valid_values.numel() > 0 else False
+    if valid_values.numel() == 0:
+        min_gain = max_gain = symmetric_factor = 1.0
+    elif has_invalid_values:
+        min_gain = max_gain = symmetric_factor = float("inf")
+    else:
+        min_gain = float(valid_values.min())
+        max_gain = float(valid_values.max())
+        symmetric_factor = max(max_gain, 1.0 / min_gain)
+    return RadialCorrection(
+        correction, invalid, min_gain, max_gain, symmetric_factor,
+        has_invalid_values, has_invalid_values or symmetric_factor > max_gain_bound,
+    )
 
 
 def psd_relative_error(reference_power: torch.Tensor, measured_power: torch.Tensor, *, min_power: float = DEFAULT_MIN_POWER) -> torch.Tensor:
@@ -153,7 +169,10 @@ class CandidateEvaluation:
     reason: str  # "" if accepted, else "psd_tolerance_exceeded" | "correction_gain_exceeded" | "condition_number_exceeded"
     correction: torch.Tensor  # (num_bins,) float64, the final cumulative correction
     measured_rms: float
+    min_gain: float
     max_gain: float
+    symmetric_correction_factor: float
+    correction_invalid: bool
     iterations_used: int
     worst_condition_number: float | None
 
@@ -215,8 +234,19 @@ def evaluate_candidate(
         step = compute_radial_correction(reference_power, measured_power, max_gain_bound=correction_gain_bound, min_power=min_power)
         correction = correction * step.correction
 
-    max_gain = float(correction[valid_reference].max()) if valid_reference.any() else 1.0
-    exceeds_gain = max_gain > correction_gain_bound
+    valid_correction = correction[valid_reference]
+    correction_invalid = bool(
+        (~torch.isfinite(valid_correction)).any() | (valid_correction <= 0).any()
+    ) if valid_correction.numel() > 0 else False
+    if valid_correction.numel() == 0:
+        min_gain = max_gain = symmetric_factor = 1.0
+    elif correction_invalid:
+        min_gain = max_gain = symmetric_factor = float("inf")
+    else:
+        min_gain = float(valid_correction.min())
+        max_gain = float(valid_correction.max())
+        symmetric_factor = max(max_gain, 1.0 / min_gain)
+    exceeds_gain = correction_invalid or symmetric_factor > correction_gain_bound
     measured_rms = _measured_rms(corrected)
 
     worst_condition_number = None
@@ -234,14 +264,21 @@ def evaluate_candidate(
 
     if not converged:
         reason = "psd_tolerance_exceeded"
+    elif correction_invalid:
+        reason = "correction_nonfinite_or_nonpositive"
     elif exceeds_gain:
-        reason = "correction_gain_exceeded"
+        # Retain the legacy machine-readable prefix while making the new
+        # two-sided meaning explicit for existing artifact consumers.
+        reason = "correction_gain_exceeded_symmetric"
     elif not condition_ok:
         reason = "condition_number_exceeded"
     else:
         reason = ""
     accepted = converged and not exceeds_gain and condition_ok
-    return CandidateEvaluation(accepted, reason, correction, measured_rms, max_gain, iterations_used, worst_condition_number)
+    return CandidateEvaluation(
+        accepted, reason, correction, measured_rms, min_gain, max_gain,
+        symmetric_factor, correction_invalid, iterations_used, worst_condition_number,
+    )
 
 
 @dataclass(frozen=True)

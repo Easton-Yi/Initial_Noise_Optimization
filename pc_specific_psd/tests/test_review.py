@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from pc_specific_psd import manifests, probing, review
 
@@ -566,6 +568,20 @@ class CrossTrackSchemaSeparationTests(unittest.TestCase):
         preview_blind_rows, _ = review.export_preview_review(preview_entries)
         with self.assertRaises(ValueError):
             review.ingest_probe_review(preview_blind_rows, [r["image_id"] for r in preview_blind_rows])
+
+
+class EffectPreviewGridTests(unittest.TestCase):
+    def test_grid_has_paired_rows_and_reference_plus_condition_columns(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "grid.png"
+            review.export_effect_preview_grid(Path(tmp) / "run", ["dose_a", "dose_b"], output)
+            self.assertTrue(output.exists())
+            with Image.open(output) as grid:
+                self.assertGreater(grid.width, 300)
+                self.assertGreater(grid.height, 1500)
+                self.assertGreater(grid.height, grid.width)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,26 @@ class SpatialVarianceMapTests(unittest.TestCase):
 
 
 class TransferMatrixDiagnosticsTests(unittest.TestCase):
+    def test_identical_operators_have_zero_covariance_distance(self):
+        distance = spectral.linear_operator_covariance_distance(
+            lambda tensor: tensor, lambda tensor: tensor, channels=2, height=6, width=6
+        )
+        self.assertAlmostEqual(distance, 0.0, places=12)
+
+    def test_orthogonal_channel_rotation_moves_pairs_but_not_covariance(self):
+        rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
+
+        def rotate(tensor):
+            return torch.einsum("oc,bchw->bohw", rotation, tensor)
+
+        bank = torch.randn(8, 2, 6, 6)
+        from pc_specific_psd.calibration_v2 import paired_relative_l2
+        self.assertGreater(paired_relative_l2(rotate(bank), bank), 0.1)
+        distance = spectral.linear_operator_covariance_distance(
+            lambda tensor: tensor, rotate, channels=2, height=6, width=6
+        )
+        self.assertAlmostEqual(distance, 0.0, places=12)
+
     def test_identity_operator_has_unit_singular_values(self):
         def identity_op(t):
             return t

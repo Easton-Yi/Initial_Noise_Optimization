@@ -14,6 +14,7 @@ import yaml
 from PIL import Image
 
 from pc_specific_psd import adapters, basis, config
+from pc_specific_psd.compat_generation import file_hash
 
 PATCH_SIZE = 5
 CHANNELS = 4
@@ -49,6 +50,25 @@ RAW_CONFIG = {
     },
 }
 
+V2_RAW_CONFIG = {
+    **RAW_CONFIG,
+    "run": {**RAW_CONFIG["run"], "name": "runner_v2_test"},
+    "psd": {
+        **RAW_CONFIG["psd"],
+        "calibration_profile": "effect_size_v2",
+        "minimum_covariance_distance": 0.0,
+        "psd_tolerance": 1.0e6,
+        "gate_candidates": [{"r_s": 0.2, "beta": 6.0}],
+        "groups": [{
+            "group_id": "B1", "tau_plus_candidates": [0.1],
+            "tau_minus_candidates": [-0.1], "target_relative_l2": [0.05],
+            "effect_target_tolerance": 10.0,
+        }],
+        "calibration_result_path": "effect_calibration_result.json",
+        "validation_result_path": "effect_validation_result.json",
+    },
+}
+
 
 def write_config(tmp_path: Path, *, groups=None) -> Path:
     raw = {**RAW_CONFIG, "psd": {**RAW_CONFIG["psd"]}}
@@ -77,6 +97,43 @@ def load_test_config(tmp_path: Path, *, groups=None) -> config.PCASpecificPSDCon
     loaded = config.load_config(path)
     write_synthetic_basis(loaded.resolve_root(loaded.basis.basis_output_path))
     return loaded
+
+
+def load_v2_test_config(tmp_path: Path) -> config.PCASpecificPSDConfig:
+    path = tmp_path / "config_v2.yaml"
+    path.write_text(yaml.safe_dump(V2_RAW_CONFIG))
+    loaded = config.load_config(path)
+    write_synthetic_basis(loaded.resolve_root(loaded.basis.basis_output_path))
+    return loaded
+
+
+def freeze_selected_effect_calibration(loaded: config.PCASpecificPSDConfig) -> str:
+    """Write one persisted v2 condition without fitting anything in the runner."""
+    condition_id = "B1_plus_tau_0p1"
+    correction = [1.0] * loaded.psd.num_bins
+    config.write_effect_calibration_registry(loaded, {
+        "status": "SELECTED",
+        "protocol": "operator_clean",
+        "gate": {"r_s": 0.2, "beta": 6.0},
+        "bank": {
+            "role": "calibration", "seed": loaded.psd.calibration_bank_seed,
+            "size": loaded.psd.calibration_bank_size,
+        },
+        "basis_hash": file_hash(loaded.resolve_root(loaded.basis.basis_output_path)),
+        "config_hash": file_hash(loaded.config_path),
+        "all_targets_reached": True,
+        "unreachable_target_count": 0,
+        "selections": [], "candidate_diagnostics": [], "tau_zero_diagnostics": [],
+        "condition_selections": {
+            condition_id: {
+                "condition_id": condition_id, "group_id": "B1", "sign": "plus",
+                "tau": 0.1, "actual_relative_l2": 0.05,
+                "target_relative_l2": [0.05], "correction": correction,
+                "diagnostics": {},
+            },
+        },
+    })
+    return condition_id
 
 
 def freeze_selected_calibration(loaded: config.PCASpecificPSDConfig, *, group_ids) -> None:

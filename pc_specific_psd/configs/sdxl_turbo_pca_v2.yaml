@@ -1,0 +1,61 @@
+# Minimal development protocol for effect-size calibration of the existing B1
+# formal operator.  The gate and candidate grid are pre-specified; calibration
+# may reject candidates but does not search gates or use generated images.
+run:
+  name: sdxl_turbo_pca_v2
+  master_seed: 20260825
+  outputs_root: ../outputs
+
+model:
+  adapter: sdxl_turbo
+  checkpoint: stabilityai/sdxl-turbo
+  vae_checkpoint: madebyollin/sdxl-vae-fp16-fix
+  revision: null
+  dtype: float16
+  device: cuda
+  cpu_offload: false
+  cache_dir: cache
+
+generation:
+  height: 512
+  width: 512
+  num_inference_steps: 1
+  guidance_scale: 0.0
+  generation_batch_size: 1
+  output_format: png
+  release_model_after_generation: true
+
+basis:
+  patch_size: 5
+  channels: 4
+  patches_per_image: 64
+  sampling_seed: 20260826
+  split_seed: 20260827
+  basis_output_path: ../basis/sdxl_turbo_pca_v1_basis.pt
+  num_leading_components: 32
+  dataset_manifest_path: ../manifests/coco_train2017_2000_seed20260829.json
+
+probing:
+  rho: 0.10
+
+psd:
+  calibration_profile: effect_size_v2
+  protocol: operator_clean
+  num_bins: 32
+  psd_tolerance: 0.05
+  correction_gain_bound: 4.0
+  condition_number_threshold: 50.0
+  minimum_covariance_distance: 1.0e-6
+  calibration_bank_size: 256
+  validation_bank_size: 128
+  calibration_bank_seed: 20260830
+  validation_bank_seed: 20260831
+  gate_candidates:
+    - {r_s: 4.0, beta: 2.0}
+  groups:
+    - group_id: B1
+      tau_plus_candidates: [0.5, 1.0, 2.0, 4.0]
+      tau_minus_candidates: [-0.5, -1.0, -2.0, -4.0]
+      target_relative_l2: [0.05, 0.10]
+  calibration_result_path: ../calibration/sdxl_turbo_pca_v2_calibration_result.json
+  validation_result_path: ../calibration/sdxl_turbo_pca_v2_validation_result.json

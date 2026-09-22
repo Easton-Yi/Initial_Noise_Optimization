@@ -38,9 +38,11 @@ from typing import Any, Literal, Sequence
 import yaml
 
 from pc_specific_psd import manifests, probing, psd_editor
-from pc_specific_psd.compat_generation import GenerationConfig
+from pc_specific_psd.compat_generation import GenerationConfig, file_hash
 
 Protocol = Literal["legacy_matched", "operator_clean"]
+RMS_CALIBRATION_PROFILE = "rms_v1"
+EFFECT_CALIBRATION_PROFILE = "effect_size_v2"
 
 _FROZEN_PSD_KEYS = ("same_phase_alpha", "same_phase_gamma", "reference_scale_profile")
 
@@ -154,11 +156,14 @@ class GroupCandidateConfig:
     group_id: str
     tau_plus_candidates: tuple[float, ...]
     tau_minus_candidates: tuple[float, ...]
-    target_rms: float
+    target_rms: float | None = None
+    target_relative_l2: tuple[float, ...] = ()
+    effect_target_tolerance: float | None = None
 
 
 @dataclass(frozen=True)
 class PSDConfig:
+    calibration_profile: str = RMS_CALIBRATION_PROFILE
     protocol: Protocol | None = None
     num_bins: int | None = None
     psd_tolerance: float | None = None
@@ -171,6 +176,8 @@ class PSDConfig:
     gate_candidates: tuple[GateCandidateConfig, ...] = ()
     groups: tuple[GroupCandidateConfig, ...] = ()
     calibration_result_path: str | None = None
+    validation_result_path: str | None = None
+    minimum_covariance_distance: float = 1e-6
 
 
 @dataclass(frozen=True)
@@ -270,7 +277,9 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
             group_id=g["group_id"],
             tau_plus_candidates=tuple(g["tau_plus_candidates"]),
             tau_minus_candidates=tuple(g["tau_minus_candidates"]),
-            target_rms=g["target_rms"],
+            target_rms=g.get("target_rms"),
+            target_relative_l2=tuple(g.get("target_relative_l2", ())),
+            effect_target_tolerance=g.get("effect_target_tolerance"),
         )
         for g in raw_psd.get("groups", [])
     )
@@ -280,13 +289,18 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
         raise ConfigError(f"config.psd.groups declares unknown group_id(s): {sorted(unknown_group_ids)}")
 
     allowed = set(_CALIBRATION_TIER_SCALAR_FIELDS) | {
-        "condition_number_threshold", "gate_candidates", "groups", "calibration_result_path",
+        "calibration_profile", "condition_number_threshold", "gate_candidates", "groups",
+        "calibration_result_path", "validation_result_path", "minimum_covariance_distance",
     }
     unknown = set(raw_psd) - allowed
     if unknown:
         raise ConfigError(f"config.psd has unknown field(s): {sorted(unknown)}")
 
+    calibration_profile = raw_psd.get("calibration_profile", RMS_CALIBRATION_PROFILE)
+    if calibration_profile not in (RMS_CALIBRATION_PROFILE, EFFECT_CALIBRATION_PROFILE):
+        raise ConfigError(f"config.psd.calibration_profile has unknown value {calibration_profile!r}")
     return PSDConfig(
+        calibration_profile=calibration_profile,
         protocol=raw_psd.get("protocol"),
         num_bins=raw_psd.get("num_bins"),
         psd_tolerance=raw_psd.get("psd_tolerance"),
@@ -299,6 +313,8 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
         gate_candidates=gate_candidates,
         groups=groups,
         calibration_result_path=raw_psd.get("calibration_result_path"),
+        validation_result_path=raw_psd.get("validation_result_path"),
+        minimum_covariance_distance=float(raw_psd.get("minimum_covariance_distance", 1e-6)),
     )
 
 
@@ -345,10 +361,16 @@ class CalibrationRegistry:
     protocol: Protocol | None
     reference_scale_profile: str | None
     group_taus: dict[str, tuple[float, float]]  # group_id -> (tau_plus, tau_minus)
+    calibration_profile: str
+    condition_selections: dict[str, dict[str, Any]]
+    config_hash: str | None
+    basis_hash: str | None
 
 
 _EMPTY_REGISTRY = CalibrationRegistry(
-    loaded=False, status=None, gate=None, protocol=None, reference_scale_profile=None, group_taus={}
+    loaded=False, status=None, gate=None, protocol=None, reference_scale_profile=None,
+    group_taus={}, calibration_profile=RMS_CALIBRATION_PROFILE, condition_selections={},
+    config_hash=None, basis_hash=None,
 )
 
 
@@ -370,6 +392,10 @@ def load_calibration_registry(config: PCASpecificPSDConfig) -> CalibrationRegist
         protocol=payload.get("protocol"),
         reference_scale_profile=payload.get("reference_scale_profile"),
         group_taus=group_taus,
+        calibration_profile=payload.get("calibration_profile", RMS_CALIBRATION_PROFILE),
+        condition_selections=dict(payload.get("condition_selections", {})),
+        config_hash=payload.get("config_hash"),
+        basis_hash=payload.get("basis_hash"),
     )
 
 
@@ -393,6 +419,7 @@ def write_calibration_registry(
         "gate": {"r_s": gate.r_s, "beta": gate.beta} if gate is not None else None,
         "protocol": protocol,
         "reference_scale_profile": config.frozen.reference_scale_profile,
+        "calibration_profile": RMS_CALIBRATION_PROFILE,
         "group_selections": {
             group_id: {"tau_plus": tau_plus, "tau_minus": tau_minus}
             for group_id, (tau_plus, tau_minus) in group_taus.items()
@@ -403,12 +430,28 @@ def write_calibration_registry(
     return path
 
 
+def write_effect_calibration_registry(config: PCASpecificPSDConfig, payload: dict[str, Any]) -> Path:
+    """Write a v2 registry without modifying or reinterpreting a v1 file."""
+    if config.psd.calibration_profile != EFFECT_CALIBRATION_PROFILE:
+        raise ConfigError("effect calibration registry requires calibration_profile='effect_size_v2'")
+    path = config.resolve_root(config.psd.calibration_result_path)
+    if path is None:
+        raise ConfigError("config.psd.calibration_result_path must be set")
+    stamped = dict(payload)
+    stamped["calibration_profile"] = EFFECT_CALIBRATION_PROFILE
+    stamped["reference_scale_profile"] = config.frozen.reference_scale_profile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stamped, indent=2, sort_keys=True))
+    return path
+
+
 # -- Per-command validation ---------------------------------------------------
 
 COMMAND_TIERS: dict[str, str] = {
     "validate-config": "basis",
     "build-basis": "basis",
     "inspect-basis": "basis",
+    "basis-stability": "basis",
     "probe": "probing",
     "export-review": "probing",
     "select-candidates": "probing",
@@ -443,8 +486,22 @@ def _calibration_tier_missing(config: PCASpecificPSDConfig) -> list[str]:
             missing.append(f"psd.groups[{group.group_id}].tau_plus_candidates")
         if not group.tau_minus_candidates:
             missing.append(f"psd.groups[{group.group_id}].tau_minus_candidates")
+        if psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+            if not group.target_relative_l2:
+                missing.append(f"psd.groups[{group.group_id}].target_relative_l2")
+        elif group.target_rms is None:
+            missing.append(f"psd.groups[{group.group_id}].target_rms")
     if psd.calibration_result_path is None:
         missing.append("psd.calibration_result_path")
+    if psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+        if len(psd.gate_candidates) != 1:
+            missing.append("psd.gate_candidates (effect_size_v2 requires exactly one pre-specified gate)")
+        if psd.validation_result_path is None:
+            missing.append("psd.validation_result_path")
+        if psd.protocol != "operator_clean":
+            missing.append("psd.protocol (effect_size_v2 requires operator_clean)")
+        if psd.calibration_bank_seed == psd.validation_bank_seed:
+            missing.append("psd.validation_bank_seed (effect_size_v2 requires a bank seed distinct from calibration)")
     return missing
 
 
@@ -464,6 +521,37 @@ def _full_tier_missing(config: PCASpecificPSDConfig, candidate_group_ids: Sequen
             f"{registry.reference_scale_profile!r} (expected {config.frozen.reference_scale_profile!r}); "
             "the registry is stale -- run `calibrate` again"
         ]
+    if registry.calibration_profile != config.psd.calibration_profile:
+        return [
+            f"calibration_result profile is {registry.calibration_profile!r} "
+            f"(expected {config.psd.calibration_profile!r}) -- run `calibrate` again"
+        ]
+    if config.psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+        current_config_hash = file_hash(config.config_path)
+        if registry.config_hash != current_config_hash:
+            return ["calibration_result config_hash does not match the current config -- run `calibrate` again"]
+        basis_path = config.resolve_root(config.basis.basis_output_path)
+        if basis_path is None or not basis_path.exists() or registry.basis_hash != file_hash(basis_path):
+            return ["calibration_result basis_hash does not match the current formal basis -- run `calibrate` again"]
+        if not registry.condition_selections:
+            return ["calibration_result.condition_selections is empty -- run `calibrate` again"]
+        validation_path = config.resolve_root(config.psd.validation_result_path)
+        if validation_path is None or not validation_path.exists():
+            return [f"noise validation result at {validation_path} does not exist -- run `validate-noise` first"]
+        validation = json.loads(validation_path.read_text())
+        if validation.get("status") != "PASS" or validation.get("calibration_profile") != EFFECT_CALIBRATION_PROFILE:
+            return ["noise validation has not passed effect_size_v2 -- do not generate preview"]
+        registry_path = config.resolve_root(config.psd.calibration_result_path)
+        if validation.get("calibration_hash") != file_hash(registry_path):
+            return ["noise validation result is stale relative to the calibration registry -- run `validate-noise` again"]
+        if validation.get("config_hash") != current_config_hash:
+            return ["noise validation result is stale relative to the current config -- run `validate-noise` again"]
+        if validation.get("basis_hash") != registry.basis_hash:
+            return ["noise validation result is stale relative to the formal basis -- run `validate-noise` again"]
+        bank = validation.get("bank", {})
+        if bank.get("seed") != config.psd.validation_bank_seed or bank.get("size") != config.psd.validation_bank_size:
+            return ["noise validation bank identity does not match config -- run `validate-noise` again"]
+        return []
     groups = (
         config.psd.groups if candidate_group_ids is None
         else [group for group in config.psd.groups if group.group_id in candidate_group_ids]

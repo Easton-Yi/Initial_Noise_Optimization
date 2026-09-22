@@ -6,17 +6,23 @@ synthetic identity basis and a fake adapter, never touching diffusers.
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
+import yaml
 
-from pc_specific_psd import calibration, manifests, psd_editor, runner
+from pc_specific_psd import calibration, cli, config, manifests, psd_editor, runner
+from pc_specific_psd.compat_generation import file_hash, read_json, tensor_hash, write_json
 from pc_specific_psd.tests._runner_test_support import (
     BASIS_DIM,
     CHANNELS,
     PATCH_SIZE,
     FakeAdapterPCA,
     freeze_selected_calibration,
+    freeze_selected_effect_calibration,
     load_test_config,
+    load_v2_test_config,
 )
 
 
@@ -238,6 +244,99 @@ class GenerateManifestTests(unittest.TestCase):
             freeze_selected_calibration(loaded, group_ids=["B5"])
             with self.assertRaises(runner.RunnerError):
                 runner.generate_manifest(loaded, [], run_id="r1", force=False)
+
+
+class EffectPreviewProvenanceTests(unittest.TestCase):
+    def _validated_fixture(self, tmp_path: Path):
+        loaded = load_v2_test_config(tmp_path)
+        condition_id = freeze_selected_effect_calibration(loaded)
+        result = cli._cmd_validate_noise_effect_v2(
+            loaded, SimpleNamespace(dry_run=False, allow_synthetic_basis=True)
+        )
+        self.assertEqual(result["status"], "PASS")
+        return loaded, condition_id
+
+    def test_fake_adapter_preview_uses_frozen_correction_and_records_all_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded, condition_id = self._validated_fixture(Path(tmp))
+            adapter = FakeAdapterPCA(loaded.model.as_model_config_dict())
+            with mock.patch.object(
+                calibration, "evaluate_candidate",
+                side_effect=AssertionError("generation must not refit correction"),
+            ):
+                run_dir = runner.generate_effect_preview(
+                    loaded, [condition_id], run_id="v2_preview", force=False,
+                    adapter=adapter, allow_synthetic_basis=True,
+                )
+            self.assertEqual(adapter.call_count, 24)
+            basis_hash = runner.basis_hash_for(loaded)
+            calibration_hash = runner.calibration_hash_for(loaded)
+            validation_path = loaded.resolve_root(loaded.psd.validation_result_path)
+            validation_hash = file_hash(validation_path)
+            validation = read_json(validation_path)
+            self.assertEqual(validation["config_hash"], file_hash(loaded.config_path))
+            self.assertEqual(validation["basis_hash"], basis_hash)
+            self.assertEqual(validation["calibration_hash"], calibration_hash)
+            manifest = read_json(run_dir / "run_manifest.json")["resolved_config"]
+            self.assertEqual(manifest["basis_hash"], basis_hash)
+            self.assertEqual(manifest["calibration_hash"], calibration_hash)
+            self.assertEqual(manifest["validation_hash"], validation_hash)
+
+            for sampled_condition in ("reference", condition_id):
+                record = _read_jsonl(
+                    run_dir / "generations" / sampled_condition / "p000_s000" / "b0" / "sample.jsonl"
+                )[0]
+                self.assertEqual(record["basis_hash"], basis_hash)
+                self.assertEqual(record["calibration_hash"], calibration_hash)
+                self.assertEqual(record["validation_hash"], validation_hash)
+
+            codec = runner.load_codec(loaded, allow_synthetic=True)
+            frozen = runner.load_effect_frozen_corrections(loaded)
+            entry = manifests.ConditionDrawEntry(condition_id, "p000", "p000_s000", 0)
+            expected = runner.render_effect_condition_latent(
+                entry, codec, frozen, channels=CHANNELS, height=8, width=8
+            )
+            candidate_record = _read_jsonl(
+                run_dir / "generations" / condition_id / "p000_s000" / "b0" / "sample.jsonl"
+            )[0]
+            self.assertEqual(candidate_record["final_noise_hash"], tensor_hash(expected[0]))
+
+    def test_changed_yaml_rejects_old_registry_validation_and_runner_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            loaded, _ = self._validated_fixture(tmp_path)
+            raw = yaml.safe_load(loaded.config_path.read_text())
+            raw["psd"]["groups"][0]["target_relative_l2"] = [0.06]
+            loaded.config_path.write_text(yaml.safe_dump(raw))
+            changed = config.load_config(loaded.config_path)
+
+            with self.assertRaisesRegex(config.ConfigValidationError, "config_hash"):
+                config.validate_for_command(changed, "generate-psd")
+            with self.assertRaisesRegex(cli.CliError, "current config"):
+                cli._cmd_validate_noise_effect_v2(
+                    changed, SimpleNamespace(dry_run=False, allow_synthetic_basis=True)
+                )
+            with self.assertRaisesRegex(runner.RunnerError, "current config"):
+                runner.load_effect_frozen_corrections(changed)
+
+    def test_replaced_validation_refuses_resume_under_same_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded, condition_id = self._validated_fixture(Path(tmp))
+            first_adapter = FakeAdapterPCA(loaded.model.as_model_config_dict())
+            runner.generate_effect_preview(
+                loaded, [condition_id], run_id="v2_preview", force=False,
+                adapter=first_adapter, allow_synthetic_basis=True,
+            )
+            validation_path = loaded.resolve_root(loaded.psd.validation_result_path)
+            validation = read_json(validation_path)
+            validation["replacement_marker"] = "changed validation artifact"
+            write_json(validation_path, validation)
+            with self.assertRaisesRegex(RuntimeError, "Run manifest differs"):
+                runner.generate_effect_preview(
+                    loaded, [condition_id], run_id="v2_preview", force=False,
+                    adapter=FakeAdapterPCA(loaded.model.as_model_config_dict()),
+                    allow_synthetic_basis=True,
+                )
 
 
 def _read_jsonl(path: Path) -> list[dict]:

@@ -87,6 +87,32 @@ class ComputeRadialCorrectionTests(unittest.TestCase):
         self.assertTrue(result.exceeds_gain_bound)
         self.assertEqual(result.max_gain, 10.0)
 
+    def test_attenuation_is_bounded_symmetrically(self):
+        result = calibration.compute_radial_correction(
+            torch.tensor([1.0], dtype=torch.float64), torch.tensor([100.0], dtype=torch.float64),
+            max_gain_bound=5.0,
+        )
+        self.assertAlmostEqual(result.min_gain, 0.1)
+        self.assertAlmostEqual(result.symmetric_factor, 10.0)
+        self.assertTrue(result.exceeds_gain_bound)
+
+    def test_two_sided_correction_inside_bound_passes(self):
+        result = calibration.compute_radial_correction(
+            torch.tensor([4.0, 1.0], dtype=torch.float64),
+            torch.tensor([1.0, 4.0], dtype=torch.float64), max_gain_bound=2.0,
+        )
+        self.assertAlmostEqual(result.symmetric_factor, 2.0)
+        self.assertFalse(result.exceeds_gain_bound)
+
+    def test_zero_power_bin_is_recorded_and_excluded_from_bound(self):
+        result = calibration.compute_radial_correction(
+            torch.tensor([0.0, 1.0], dtype=torch.float64),
+            torch.tensor([0.0, 1.0], dtype=torch.float64), max_gain_bound=1.0,
+        )
+        self.assertTrue(bool(result.invalid_bins[0]))
+        self.assertEqual(float(result.correction[0]), 1.0)
+        self.assertFalse(result.exceeds_gain_bound)
+
     def test_mismatched_shapes_raise(self):
         with self.assertRaises(ValueError):
             calibration.compute_radial_correction(torch.ones(3, dtype=torch.float64), torch.ones(2, dtype=torch.float64), max_gain_bound=1.0)

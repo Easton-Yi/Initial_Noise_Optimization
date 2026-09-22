@@ -703,6 +703,33 @@ def _build_contact_sheet(cells: Sequence[Sequence[tuple[str, Optional[Path]]]]):
     return sheet
 
 
+def export_effect_preview_grid(
+    preview_run_dir: Path,
+    condition_ids: Sequence[str],
+    output_path: Path,
+) -> Path:
+    """Write the v2 comparison grid with one paired prompt/seed per row.
+
+    The reference is always the first column; each following column is one
+    unique frozen formal-operator condition for that exact base-noise draw.
+    """
+    ordered_conditions = ("reference", *tuple(dict.fromkeys(condition_ids)))
+    cells = []
+    for prompt, block in manifests.prompt_block_pairs():
+        cells.append([
+            (
+                f"{prompt.prompt_id}/{block.block_id}/{condition_id}",
+                Path(preview_run_dir) / "generations" / condition_id / block.block_id / "b0" / "image.png",
+            )
+            for condition_id in ordered_conditions
+        ])
+    sheet = _build_contact_sheet(cells)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, format="PNG")
+    return output_path
+
+
 # -- Touchpoint 1: probe-group review -----------------------------------------
 
 

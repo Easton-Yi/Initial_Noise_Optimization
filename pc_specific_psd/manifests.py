@@ -260,6 +260,24 @@ def build_preview_manifest_entries(candidate_group_ids: Sequence[str]) -> tuple[
     return tuple(entries)
 
 
+def build_effect_preview_manifest_entries(condition_ids: Sequence[str]) -> tuple[ConditionDrawEntry, ...]:
+    """Build the v2 formal-operator preview: one shared reference plus each
+    unique reachable frozen dose across the 12 prompt/seed pairs (at most 60
+    images for the requested four non-reference conditions).
+    """
+    unique = tuple(dict.fromkeys(condition_ids))
+    if "reference" in unique:
+        raise ValueError("effect condition ids must not include the reserved 'reference' id")
+    if len(unique) > 4:
+        raise ValueError(f"effect preview permits at most four non-reference conditions, got {len(unique)}")
+    conditions = ("reference", *unique)
+    return tuple(
+        ConditionDrawEntry(condition_id, prompt.prompt_id, block.block_id, PROBING_BASE_INDEX)
+        for condition_id in conditions
+        for prompt, block in prompt_block_pairs()
+    )
+
+
 FULL_PILOT_BASE_INDICES = range(FULL_PILOT_BASE_INDEX_OFFSET, FULL_PILOT_BASE_INDEX_OFFSET + NUM_BASE_INDICES_PER_BLOCK)
 
 

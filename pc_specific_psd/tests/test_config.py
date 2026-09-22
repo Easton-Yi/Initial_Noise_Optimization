@@ -21,6 +21,15 @@ def _write_config(tmp_path: Path, raw: dict, name: str = "config.yaml") -> Path:
 
 
 class LoadConfigStructureTests(unittest.TestCase):
+    def test_checked_in_v2_config_declares_fixed_gate_and_effect_targets(self):
+        path = Path(__file__).parents[1] / "configs" / "sdxl_turbo_pca_v2.yaml"
+        loaded = config.load_config(path)
+        self.assertEqual(loaded.psd.calibration_profile, config.EFFECT_CALIBRATION_PROFILE)
+        self.assertEqual(len(loaded.psd.gate_candidates), 1)
+        self.assertEqual(loaded.psd.groups[0].target_relative_l2, (0.05, 0.10))
+        self.assertEqual(loaded.psd.groups[0].tau_plus_candidates, (0.5, 1.0, 2.0, 4.0))
+        self.assertNotEqual(loaded.psd.calibration_bank_seed, loaded.psd.validation_bank_seed)
+
     def test_minimal_config_loads_with_needs_calibration_fields_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_config(Path(tmp), MINIMAL_RAW)

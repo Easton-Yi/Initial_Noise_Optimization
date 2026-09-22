@@ -145,6 +145,13 @@ class BudgetCalculatorTests(unittest.TestCase):
 
 
 class RunManifestEntryTests(unittest.TestCase):
+    def test_effect_preview_deduplicates_conditions_and_caps_at_60(self):
+        entries = manifests.build_effect_preview_manifest_entries(["B1_plus_tau_1", "B1_plus_tau_1", "B1_minus_tau_2"])
+        self.assertEqual(len(entries), 36)
+        self.assertEqual({entry.condition_id for entry in entries}, {"reference", "B1_plus_tau_1", "B1_minus_tau_2"})
+        with self.assertRaises(ValueError):
+            manifests.build_effect_preview_manifest_entries(["a", "b", "c", "d", "e"])
+
     def test_preview_manifest_empty_for_zero_candidates(self):
         self.assertEqual(manifests.build_preview_manifest_entries([]), ())
 

@@ -122,6 +122,72 @@ class TransferMatrixDiagnostics:
     worst_condition_number: float
 
 
+def linear_operator_frequency_response(
+    apply_operator, channels: int, height: int, width: int
+) -> torch.Tensor:
+    """Return the complete rFFT transfer ``M(omega)`` of a fixed linear,
+    translation-equivariant operator.
+
+    The result has shape ``(H, W//2+1, C_out, C_in)``.  It is intentionally
+    built from only ``channels`` impulses rather than a dense ``CHW x CHW``
+    matrix.  Callers are responsible for ensuring their boundary handling
+    makes the operator translation equivariant (the formal PSD editor uses
+    circular patch extraction and fixed Fourier multipliers).
+    """
+    impulses = torch.zeros((channels, channels, height, width))
+    for channel in range(channels):
+        impulses[channel, channel, 0, 0] = 1.0
+    responses = torch.stack(
+        [apply_operator(impulses[channel:channel + 1])[0] for channel in range(channels)],
+        dim=0,
+    )  # (C_in, C_out, H, W)
+    fft = torch.fft.rfft2(responses.to(torch.float64), dim=(-2, -1))
+    return fft.permute(2, 3, 1, 0).contiguous()  # (H, Wf, C_out, C_in)
+
+
+def covariance_distance_from_frequency_responses(
+    reference_response: torch.Tensor,
+    candidate_response: torch.Tensor,
+    *,
+    width: int,
+) -> float:
+    """Relative Frobenius distance between output covariance spectra.
+
+    For unit white Gaussian input, ``Sigma(omega) = M(omega) M(omega)^*``.
+    The aggregation uses the same real-FFT column multiplicities as radial
+    PSD calculations.  This detects distribution changes that paired L2
+    alone cannot: an orthogonal channel rotation has nonzero paired distance
+    but exactly zero covariance distance.
+    """
+    if reference_response.shape != candidate_response.shape:
+        raise ValueError("reference and candidate frequency responses must have the same shape")
+    if reference_response.ndim != 4:
+        raise ValueError("frequency responses must have shape (H, Wf, C_out, C_in)")
+    ref = reference_response.to(torch.complex128)
+    candidate = candidate_response.to(torch.complex128)
+    sigma_ref = ref @ ref.conj().transpose(-2, -1)
+    sigma_candidate = candidate @ candidate.conj().transpose(-2, -1)
+    weights = _rfft_conjugate_weights(width).to(torch.float64).view(1, -1, 1, 1)
+    numerator = ((sigma_candidate - sigma_ref).abs().square() * weights).sum()
+    denominator = (sigma_ref.abs().square() * weights).sum()
+    if denominator <= 0:
+        return 0.0 if numerator <= 0 else float("inf")
+    return float((numerator / denominator).sqrt())
+
+
+def linear_operator_covariance_distance(
+    reference_operator,
+    candidate_operator,
+    channels: int,
+    height: int,
+    width: int,
+) -> float:
+    """Convenience wrapper computing the analytic covariance distance."""
+    reference = linear_operator_frequency_response(reference_operator, channels, height, width)
+    candidate = linear_operator_frequency_response(candidate_operator, channels, height, width)
+    return covariance_distance_from_frequency_responses(reference, candidate, width=width)
+
+
 def impulse_response_transfer_matrix(apply_operator, channels: int, height: int, width: int, *, num_freq_samples: int = 32, seed: int = 0) -> TransferMatrixDiagnostics:
     """Per-frequency C x C transfer matrix of a linear per-channel-mixing operator.
 
@@ -132,12 +198,8 @@ def impulse_response_transfer_matrix(apply_operator, channels: int, height: int,
     in channel ``c``. Deliberately avoids constructing the full ``CHW x CHW``
     covariance/operator matrix.
     """
-    impulses = torch.zeros((channels, channels, height, width))
-    for c in range(channels):
-        impulses[c, c, 0, 0] = 1.0
-    responses = torch.stack([apply_operator(impulses[c:c + 1])[0] for c in range(channels)], dim=0)  # (C_in, C_out, H, W)
-    fft = torch.fft.rfft2(responses.to(torch.float64), dim=(-2, -1))  # (C_in, C_out, H, Wf)
-    n_cols = fft.shape[-1]
+    response = linear_operator_frequency_response(apply_operator, channels, height, width)
+    n_cols = response.shape[1]
     generator = torch.Generator().manual_seed(seed)
     total = height * n_cols
     num_samples = min(num_freq_samples, total)
@@ -145,7 +207,7 @@ def impulse_response_transfer_matrix(apply_operator, channels: int, height: int,
     rows, cols = torch.div(flat_indices, n_cols, rounding_mode="floor"), flat_indices % n_cols
     singular_values, condition_numbers, coords = [], [], []
     for row, col in zip(rows.tolist(), cols.tolist()):
-        matrix = fft[:, :, row, col]  # (C_in, C_out) complex
+        matrix = response[row, col]  # (C_out, C_in) complex
         values = torch.linalg.svdvals(matrix)
         singular_values.append(values)
         condition_numbers.append(float(values.max() / values.min().clamp(min=1e-30)))
