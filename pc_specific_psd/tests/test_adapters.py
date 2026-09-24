@@ -26,6 +26,12 @@ class _FakePipeline:
         return SimpleNamespace(images=[Image.new("RGB", (2, 2))])
 
 
+class _ScalingPipeline(_FakePipeline):
+    def prepare_latents(self, batch_size, latents=None):
+        self.received = latents
+        return latents * 2.0
+
+
 class _IgnoringPipeline(_FakePipeline):
     def __call__(self, *, latents, generator=None, **kwargs):
         self.prepare_latents(1, latents=None)
@@ -257,6 +263,25 @@ class PairedGeneratorTests(unittest.TestCase):
         self.assertEqual(len(images), 3)
         self.assertEqual(len(adapter.last_generated_latent_hashes), 3)
         self.assertEqual(adapter.last_pair_keys, pair_keys)
+
+    def test_records_actual_prepare_latents_return_when_pipeline_scales_it(self):
+        adapter = _TestAdapterPCA(_config())
+        adapter._load()
+        adapter.pipe = _ScalingPipeline()
+        latent = torch.randn(1, 4, 4, 4)
+        adapter.generate(
+            "prompt", latent, [("p000", "b0", 0)], seed=1,
+            generation_config=GENERATION_CONFIG,
+        )
+        self.assertNotEqual(
+            adapter.last_prepare_latents_input_hash,
+            adapter.last_prepare_latents_return_hash,
+        )
+        self.assertEqual(
+            adapter.last_injection_record["prepare_latents_return_hash"],
+            adapter.last_prepare_latents_return_hash,
+        )
+        self.assertEqual(adapter.last_injection_record["prepare_latents_return_shape"], [1, 4, 4, 4])
 
 
 class LoadAndPreprocessImageTests(unittest.TestCase):

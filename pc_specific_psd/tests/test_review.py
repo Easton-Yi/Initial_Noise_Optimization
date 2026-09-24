@@ -35,6 +35,14 @@ def _fill_preview_row(blind_row, **overrides):
     return filled
 
 
+def _fill_expected_rms_preview_row(blind_row, **overrides):
+    filled = _fill_preview_row(blind_row)
+    filled.update({field: 1 for field in review.EXPECTED_RMS_CHANGE_FIELDS})
+    filled["change_evidence"] = "visible paired change"
+    filled.update(overrides)
+    return filled
+
+
 def _fill_gallery_row(blind_row, **overrides):
     filled = dict(blind_row)
     ratings = {}
@@ -433,6 +441,53 @@ class IngestPreviewReviewTests(unittest.TestCase):
         filled[0]["image_id"] = "not_a_real_image_id"
         with self.assertRaises(ValueError):
             review.ingest_preview_review(filled, self.expected_ids)
+
+
+class ExpectedRMSPreviewReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.entries = manifests.build_expected_rms_preview_manifest_entries(
+            ["candidate", "candidate_fourier_control"]
+        )
+        self.blind_rows, self.mapping = review.export_expected_rms_preview_review(self.entries)
+        self.expected_ids = [row["image_id"] for row in self.blind_rows]
+
+    def test_export_contains_all_change_fields_without_identity_leak(self):
+        for row in self.blind_rows:
+            self.assertNotIn("condition_id", row)
+            for field in review.EXPECTED_RMS_CHANGE_FIELDS:
+                self.assertIn(field, row)
+                self.assertIsNone(row[field])
+            self.assertIn("change_evidence", row)
+            self.assertIsNone(row["change_evidence"])
+
+    def test_expanded_roundtrip_preserves_all_change_ratings_and_evidence(self):
+        filled = [_fill_expected_rms_preview_row(row) for row in self.blind_rows]
+        rows = review.ingest_expected_rms_preview_review(filled, self.expected_ids)
+        self.assertEqual(len(rows), len(filled))
+        self.assertEqual(rows[0].change_evidence, "visible paired change")
+        self.assertEqual(set(rows[0].change_ratings), set(review.EXPECTED_RMS_CHANGE_FIELDS))
+        self.assertEqual(set(rows[0].change_ratings.values()), {1})
+        self.assertEqual(rows[0].evidence, "evidence text")
+
+    def test_missing_expanded_field_is_rejected(self):
+        filled = [_fill_expected_rms_preview_row(row) for row in self.blind_rows]
+        del filled[0][review.EXPECTED_RMS_CHANGE_FIELDS[0]]
+        with self.assertRaises(ValueError):
+            review.ingest_expected_rms_preview_review(filled, self.expected_ids)
+
+    def test_missing_change_evidence_is_rejected(self):
+        filled = [_fill_expected_rms_preview_row(row) for row in self.blind_rows]
+        del filled[0]["change_evidence"]
+        with self.assertRaises(ValueError):
+            review.ingest_expected_rms_preview_review(filled, self.expected_ids)
+
+    def test_legacy_preview_file_remains_readable(self):
+        legacy_rows, _ = review.export_preview_review(self.entries)
+        filled = [_fill_preview_row(row) for row in legacy_rows]
+        rows = review.ingest_expected_rms_preview_review(
+            filled, [row["image_id"] for row in legacy_rows]
+        )
+        self.assertTrue(all(isinstance(row, review.PreviewReviewRow) for row in rows))
 
 
 class ExportGalleryReviewTests(unittest.TestCase):

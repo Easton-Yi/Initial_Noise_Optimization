@@ -278,6 +278,28 @@ def build_effect_preview_manifest_entries(condition_ids: Sequence[str]) -> tuple
     )
 
 
+
+
+def build_expected_rms_preview_manifest_entries(condition_ids: Sequence[str]) -> tuple[ConditionDrawEntry, ...]:
+    """Reference plus at most four PCA candidates and their four controls.
+
+    ``condition_ids`` contains only non-reference frozen operator IDs. The
+    shared reference is inserted once for each of the 12 prompt/seed pairs,
+    so the hard maximum is ``12 * (1 + 8) == 108`` images.
+    """
+    unique = tuple(dict.fromkeys(condition_ids))
+    if "reference" in unique:
+        raise ValueError("expected-RMS condition ids must not include the reserved 'reference' id")
+    if len(unique) > 8:
+        raise ValueError(f"expected-RMS preview permits at most eight non-reference conditions, got {len(unique)}")
+    conditions = ("reference", *unique)
+    return tuple(
+        ConditionDrawEntry(condition_id, prompt.prompt_id, block.block_id, PROBING_BASE_INDEX)
+        for condition_id in conditions
+        for prompt, block in prompt_block_pairs()
+    )
+
+
 FULL_PILOT_BASE_INDICES = range(FULL_PILOT_BASE_INDEX_OFFSET, FULL_PILOT_BASE_INDEX_OFFSET + NUM_BASE_INDICES_PER_BLOCK)
 
 

@@ -37,12 +37,13 @@ from typing import Any, Literal, Sequence
 
 import yaml
 
-from pc_specific_psd import manifests, probing, psd_editor
+from pc_specific_psd import manifests, probing, psd_editor, spectral
 from pc_specific_psd.compat_generation import GenerationConfig, file_hash
 
 Protocol = Literal["legacy_matched", "operator_clean"]
 RMS_CALIBRATION_PROFILE = "rms_v1"
 EFFECT_CALIBRATION_PROFILE = "effect_size_v2"
+EXPECTED_RMS_CALIBRATION_PROFILE = "expected_rms_v1"
 
 _FROZEN_PSD_KEYS = ("same_phase_alpha", "same_phase_gamma", "reference_scale_profile")
 
@@ -164,6 +165,7 @@ class GroupCandidateConfig:
 @dataclass(frozen=True)
 class PSDConfig:
     calibration_profile: str = RMS_CALIBRATION_PROFILE
+    energy_constraint: str = "radial_matched"
     protocol: Protocol | None = None
     num_bins: int | None = None
     psd_tolerance: float | None = None
@@ -178,6 +180,7 @@ class PSDConfig:
     calibration_result_path: str | None = None
     validation_result_path: str | None = None
     minimum_covariance_distance: float = 1e-6
+    processing_batch_size: int = 8
 
 
 @dataclass(frozen=True)
@@ -213,6 +216,8 @@ class PCASpecificPSDConfig:
             "same_phase_alpha": self.frozen.same_phase_alpha,
             "same_phase_gamma": self.frozen.same_phase_gamma,
             "reference_scale_profile": self.frozen.reference_scale_profile,
+            "calibration_profile": self.psd.calibration_profile,
+            "energy_constraint": self.psd.energy_constraint,
         }
 
 
@@ -289,18 +294,26 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
         raise ConfigError(f"config.psd.groups declares unknown group_id(s): {sorted(unknown_group_ids)}")
 
     allowed = set(_CALIBRATION_TIER_SCALAR_FIELDS) | {
-        "calibration_profile", "condition_number_threshold", "gate_candidates", "groups",
-        "calibration_result_path", "validation_result_path", "minimum_covariance_distance",
+        "calibration_profile", "energy_constraint", "condition_number_threshold", "gate_candidates", "groups",
+        "calibration_result_path", "validation_result_path", "minimum_covariance_distance", "processing_batch_size",
     }
     unknown = set(raw_psd) - allowed
     if unknown:
         raise ConfigError(f"config.psd has unknown field(s): {sorted(unknown)}")
 
     calibration_profile = raw_psd.get("calibration_profile", RMS_CALIBRATION_PROFILE)
-    if calibration_profile not in (RMS_CALIBRATION_PROFILE, EFFECT_CALIBRATION_PROFILE):
+    if calibration_profile not in (RMS_CALIBRATION_PROFILE, EFFECT_CALIBRATION_PROFILE, EXPECTED_RMS_CALIBRATION_PROFILE):
         raise ConfigError(f"config.psd.calibration_profile has unknown value {calibration_profile!r}")
+    energy_constraint = raw_psd.get("energy_constraint", "radial_matched")
+    expected_constraint = "expected_rms" if calibration_profile == EXPECTED_RMS_CALIBRATION_PROFILE else "radial_matched"
+    if energy_constraint != expected_constraint:
+        raise ConfigError(
+            f"config.psd.energy_constraint={energy_constraint!r} is incompatible with "
+            f"calibration_profile={calibration_profile!r}; expected {expected_constraint!r}"
+        )
     return PSDConfig(
         calibration_profile=calibration_profile,
+        energy_constraint=energy_constraint,
         protocol=raw_psd.get("protocol"),
         num_bins=raw_psd.get("num_bins"),
         psd_tolerance=raw_psd.get("psd_tolerance"),
@@ -315,6 +328,7 @@ def _build_psd_config(raw_psd: dict) -> PSDConfig:
         calibration_result_path=raw_psd.get("calibration_result_path"),
         validation_result_path=raw_psd.get("validation_result_path"),
         minimum_covariance_distance=float(raw_psd.get("minimum_covariance_distance", 1e-6)),
+        processing_batch_size=int(raw_psd.get("processing_batch_size", 8)),
     )
 
 
@@ -363,13 +377,14 @@ class CalibrationRegistry:
     group_taus: dict[str, tuple[float, float]]  # group_id -> (tau_plus, tau_minus)
     calibration_profile: str
     condition_selections: dict[str, dict[str, Any]]
+    frozen_operators: dict[str, dict[str, Any]]
     config_hash: str | None
     basis_hash: str | None
 
 
 _EMPTY_REGISTRY = CalibrationRegistry(
     loaded=False, status=None, gate=None, protocol=None, reference_scale_profile=None,
-    group_taus={}, calibration_profile=RMS_CALIBRATION_PROFILE, condition_selections={},
+    group_taus={}, calibration_profile=RMS_CALIBRATION_PROFILE, condition_selections={}, frozen_operators={},
     config_hash=None, basis_hash=None,
 )
 
@@ -394,6 +409,7 @@ def load_calibration_registry(config: PCASpecificPSDConfig) -> CalibrationRegist
         group_taus=group_taus,
         calibration_profile=payload.get("calibration_profile", RMS_CALIBRATION_PROFILE),
         condition_selections=dict(payload.get("condition_selections", {})),
+        frozen_operators=dict(payload.get("frozen_operators", {})),
         config_hash=payload.get("config_hash"),
         basis_hash=payload.get("basis_hash"),
     )
@@ -420,6 +436,7 @@ def write_calibration_registry(
         "protocol": protocol,
         "reference_scale_profile": config.frozen.reference_scale_profile,
         "calibration_profile": RMS_CALIBRATION_PROFILE,
+        "diagnostic_versions": spectral.diagnostic_definition_versions(),
         "group_selections": {
             group_id: {"tau_plus": tau_plus, "tau_minus": tau_minus}
             for group_id, (tau_plus, tau_minus) in group_taus.items()
@@ -440,12 +457,30 @@ def write_effect_calibration_registry(config: PCASpecificPSDConfig, payload: dic
     stamped = dict(payload)
     stamped["calibration_profile"] = EFFECT_CALIBRATION_PROFILE
     stamped["reference_scale_profile"] = config.frozen.reference_scale_profile
+    stamped["diagnostic_versions"] = spectral.diagnostic_definition_versions()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(stamped, indent=2, sort_keys=True))
     return path
 
 
 # -- Per-command validation ---------------------------------------------------
+
+
+def write_expected_rms_calibration_registry(config: PCASpecificPSDConfig, payload: dict[str, Any]) -> Path:
+    """Persist a complete expected-RMS operator registry."""
+    if config.psd.calibration_profile != EXPECTED_RMS_CALIBRATION_PROFILE:
+        raise ConfigError("expected-RMS registry requires calibration_profile='expected_rms_v1'")
+    path = config.resolve_root(config.psd.calibration_result_path)
+    if path is None:
+        raise ConfigError("config.psd.calibration_result_path must be set")
+    stamped = dict(payload)
+    stamped["calibration_profile"] = EXPECTED_RMS_CALIBRATION_PROFILE
+    stamped["energy_constraint"] = "expected_rms"
+    stamped["reference_scale_profile"] = config.frozen.reference_scale_profile
+    stamped["diagnostic_versions"] = spectral.diagnostic_definition_versions()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stamped, indent=2, sort_keys=True))
+    return path
 
 COMMAND_TIERS: dict[str, str] = {
     "validate-config": "basis",
@@ -486,22 +521,35 @@ def _calibration_tier_missing(config: PCASpecificPSDConfig) -> list[str]:
             missing.append(f"psd.groups[{group.group_id}].tau_plus_candidates")
         if not group.tau_minus_candidates:
             missing.append(f"psd.groups[{group.group_id}].tau_minus_candidates")
-        if psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+        if psd.calibration_profile in (EFFECT_CALIBRATION_PROFILE, EXPECTED_RMS_CALIBRATION_PROFILE):
             if not group.target_relative_l2:
                 missing.append(f"psd.groups[{group.group_id}].target_relative_l2")
         elif group.target_rms is None:
             missing.append(f"psd.groups[{group.group_id}].target_rms")
     if psd.calibration_result_path is None:
         missing.append("psd.calibration_result_path")
-    if psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+    if psd.calibration_profile in (EFFECT_CALIBRATION_PROFILE, EXPECTED_RMS_CALIBRATION_PROFILE):
         if len(psd.gate_candidates) != 1:
-            missing.append("psd.gate_candidates (effect_size_v2 requires exactly one pre-specified gate)")
+            missing.append("psd.gate_candidates (effect_size_v2/expected_rms_v1 requires exactly one pre-specified gate)")
         if psd.validation_result_path is None:
             missing.append("psd.validation_result_path")
         if psd.protocol != "operator_clean":
-            missing.append("psd.protocol (effect_size_v2 requires operator_clean)")
+            missing.append("psd.protocol (effect_size_v2/expected_rms_v1 requires operator_clean)")
         if psd.calibration_bank_seed == psd.validation_bank_seed:
-            missing.append("psd.validation_bank_seed (effect_size_v2 requires a bank seed distinct from calibration)")
+            missing.append("psd.validation_bank_seed (effect_size_v2/expected_rms_v1 requires a bank seed distinct from calibration)")
+        if psd.calibration_profile == EXPECTED_RMS_CALIBRATION_PROFILE:
+            gate = psd.gate_candidates[0] if len(psd.gate_candidates) == 1 else None
+            if gate is not None and (gate.r_s, gate.beta) != (4.0, 2.0):
+                missing.append("psd.gate_candidates (expected_rms_v1 fixes r_s=4.0, beta=2.0)")
+            if tuple(group.group_id for group in psd.groups) != ("B1",):
+                missing.append("psd.groups (expected_rms_v1 first round requires only B1)")
+            for group in psd.groups:
+                if any(tau <= 0 or tau > 2 for tau in group.tau_plus_candidates):
+                    missing.append(f"psd.groups[{group.group_id}].tau_plus_candidates (must be within (0, 2])")
+                if any(tau >= 0 or tau < -2 for tau in group.tau_minus_candidates):
+                    missing.append(f"psd.groups[{group.group_id}].tau_minus_candidates (must be within [-2, 0))")
+    if psd.processing_batch_size <= 0:
+        missing.append("psd.processing_batch_size (must be positive)")
     return missing
 
 
@@ -526,21 +574,23 @@ def _full_tier_missing(config: PCASpecificPSDConfig, candidate_group_ids: Sequen
             f"calibration_result profile is {registry.calibration_profile!r} "
             f"(expected {config.psd.calibration_profile!r}) -- run `calibrate` again"
         ]
-    if config.psd.calibration_profile == EFFECT_CALIBRATION_PROFILE:
+    if config.psd.calibration_profile in (EFFECT_CALIBRATION_PROFILE, EXPECTED_RMS_CALIBRATION_PROFILE):
         current_config_hash = file_hash(config.config_path)
         if registry.config_hash != current_config_hash:
             return ["calibration_result config_hash does not match the current config -- run `calibrate` again"]
         basis_path = config.resolve_root(config.basis.basis_output_path)
         if basis_path is None or not basis_path.exists() or registry.basis_hash != file_hash(basis_path):
             return ["calibration_result basis_hash does not match the current formal basis -- run `calibrate` again"]
-        if not registry.condition_selections:
+        if config.psd.calibration_profile == EFFECT_CALIBRATION_PROFILE and not registry.condition_selections:
             return ["calibration_result.condition_selections is empty -- run `calibrate` again"]
+        if config.psd.calibration_profile == EXPECTED_RMS_CALIBRATION_PROFILE and not registry.frozen_operators:
+            return ["calibration_result.frozen_operators is empty -- run `calibrate` again"]
         validation_path = config.resolve_root(config.psd.validation_result_path)
         if validation_path is None or not validation_path.exists():
             return [f"noise validation result at {validation_path} does not exist -- run `validate-noise` first"]
         validation = json.loads(validation_path.read_text())
-        if validation.get("status") != "PASS" or validation.get("calibration_profile") != EFFECT_CALIBRATION_PROFILE:
-            return ["noise validation has not passed effect_size_v2 -- do not generate preview"]
+        if validation.get("status") != "PASS" or validation.get("calibration_profile") != config.psd.calibration_profile:
+            return ["noise validation has not passed the configured calibration profile -- do not generate preview"]
         registry_path = config.resolve_root(config.psd.calibration_result_path)
         if validation.get("calibration_hash") != file_hash(registry_path):
             return ["noise validation result is stale relative to the calibration registry -- run `validate-noise` again"]

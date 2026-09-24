@@ -152,9 +152,20 @@ class RunManifestEntryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manifests.build_effect_preview_manifest_entries(["a", "b", "c", "d", "e"])
 
+
     def test_preview_manifest_empty_for_zero_candidates(self):
         self.assertEqual(manifests.build_preview_manifest_entries([]), ())
 
+    def test_expected_rms_preview_deduplicates_and_caps_at_108(self):
+        condition_ids = [f"condition_{index}" for index in range(8)]
+        entries = manifests.build_expected_rms_preview_manifest_entries(
+            [condition_ids[0], *condition_ids]
+        )
+        self.assertEqual(len(entries), 108)
+        self.assertEqual(len({entry.condition_id for entry in entries}), 9)
+        self.assertTrue(all(entry.base_index == manifests.PROBING_BASE_INDEX for entry in entries))
+        with self.assertRaises(ValueError):
+            manifests.build_expected_rms_preview_manifest_entries([f"c{index}" for index in range(9)])
     def test_preview_manifest_sizes_match_budget_calculator(self):
         one = manifests.build_preview_manifest_entries(["B3"])
         two = manifests.build_preview_manifest_entries(["B3", "B5"])

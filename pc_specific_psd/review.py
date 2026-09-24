@@ -495,6 +495,89 @@ def ingest_preview_review(raw_rows: Sequence[Mapping], expected_image_ids: Seque
     return tuple(seen[iid] for iid in expected_image_ids)
 
 
+EXPECTED_RMS_CHANGE_FIELDS: tuple[str, ...] = (
+    "composition",
+    "position",
+    "pose",
+    "shape",
+    "color_lighting",
+    "texture",
+    "structural_breakage",
+    "extra_or_repeated_objects",
+)
+
+
+@dataclass(frozen=True)
+class ExpectedRMSPreviewReviewRow:
+    image_id: str
+    change_ratings: dict
+    prompt_plausibility: str
+    artifacts: dict
+    quality: str
+    evidence: str
+    change_evidence: str
+    confidence: str
+
+
+def export_expected_rms_preview_review(
+    entries: Sequence[manifests.ConditionDrawEntry],
+) -> tuple[tuple[dict, ...], tuple[PreviewReviewMappingEntry, ...]]:
+    """Export the expected-RMS review schema without changing legacy previews."""
+    rows, mapping = export_preview_review(entries)
+    expanded = []
+    for row in rows:
+        expanded.append({
+            **row,
+            **{field: None for field in EXPECTED_RMS_CHANGE_FIELDS},
+            "change_evidence": None,
+        })
+    return tuple(expanded), mapping
+
+
+def ingest_expected_rms_preview_review(
+    raw_rows: Sequence[Mapping],
+    expected_image_ids: Sequence[str],
+) -> tuple[ExpectedRMSPreviewReviewRow | PreviewReviewRow, ...]:
+    """Read the expanded schema, while accepting pre-expansion review files.
+
+    A file with none of the expected-RMS fields is treated as a legacy preview
+    review. Mixed or partially populated expanded schemas fail validation.
+    """
+    any_expanded = any(
+        any(field in raw for field in EXPECTED_RMS_CHANGE_FIELDS)
+        or "change_evidence" in raw
+        for raw in raw_rows
+    )
+    base_rows = ingest_preview_review(raw_rows, expected_image_ids)
+    if not any_expanded:
+        return base_rows
+    raw_by_id = {raw.get("image_id"): raw for raw in raw_rows}
+    result = []
+    for base in base_rows:
+        raw = raw_by_id[base.image_id]
+        ratings = {}
+        for field in EXPECTED_RMS_CHANGE_FIELDS:
+            value = _get_required(raw, field, f"image {base.image_id}")
+            _validate_enum(value, ROLE_RATING_VALUES, field, f"image {base.image_id}")
+            ratings[field] = value
+        change_evidence = _get_required(raw, "change_evidence", f"image {base.image_id}")
+        _require(
+            isinstance(change_evidence, str) and change_evidence.strip() != "",
+            f"image {base.image_id}: change_evidence must be a non-empty string",
+        )
+        result.append(ExpectedRMSPreviewReviewRow(
+            image_id=base.image_id,
+            change_ratings=ratings,
+            prompt_plausibility=base.prompt_plausibility,
+            artifacts=base.artifacts,
+            quality=base.quality,
+            evidence=base.evidence,
+            change_evidence=change_evidence,
+            confidence=base.confidence,
+        ))
+    return tuple(result)
+
+
 # == Track 3: gallery review ====================================================
 
 
@@ -707,6 +790,8 @@ def export_effect_preview_grid(
     preview_run_dir: Path,
     condition_ids: Sequence[str],
     output_path: Path,
+    *,
+    condition_labels: Mapping[str, str] | None = None,
 ) -> Path:
     """Write the v2 comparison grid with one paired prompt/seed per row.
 
@@ -718,7 +803,9 @@ def export_effect_preview_grid(
     for prompt, block in manifests.prompt_block_pairs():
         cells.append([
             (
-                f"{prompt.prompt_id}/{block.block_id}/{condition_id}",
+                f"{prompt.prompt_id}/{block.block_id}/" + (
+                    condition_labels.get(condition_id, condition_id) if condition_labels else condition_id
+                ),
                 Path(preview_run_dir) / "generations" / condition_id / block.block_id / "b0" / "image.png",
             )
             for condition_id in ordered_conditions

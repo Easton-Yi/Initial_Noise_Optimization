@@ -30,12 +30,15 @@ from pc_specific_psd import (
     basis as basis_module,
     calibration,
     calibration_v2,
+    expected_rms,
     config,
     manifests,
     metrics,
     probing,
     review,
     runner,
+    spectral,
+    psd_editor,
     workflow,
 )
 from pc_specific_psd.adapters import SDXLTurboAdapterPCA
@@ -357,6 +360,8 @@ def _cmd_select_candidates(cfg: config.PCASpecificPSDConfig, args: argparse.Name
 
 
 def _cmd_calibrate(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    if cfg.psd.calibration_profile == config.EXPECTED_RMS_CALIBRATION_PROFILE:
+        return _cmd_calibrate_expected_rms(cfg, args)
     if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
         return _cmd_calibrate_effect_v2(cfg, args)
     height = cfg.generation.config.height // 8
@@ -520,6 +525,295 @@ def _effect_condition_selections(result: calibration_v2.EffectCalibrationResult)
     return conditions
 
 
+def _cmd_calibrate_expected_rms(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    """Freeze deterministic expected-energy scales and matched controls."""
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
+    if args.dry_run:
+        return {
+            "status": "dry-run",
+            "calibration_profile": expected_rms.CALIBRATION_PROFILE,
+            "energy_constraint": expected_rms.ENERGY_CONSTRAINT,
+            "fixed_gate": _jsonable(cfg.psd.gate_candidates[0]),
+            "groups": [group.group_id for group in cfg.psd.groups],
+            "targets": {group.group_id: list(group.target_relative_l2) for group in cfg.psd.groups},
+            "processing_batch_size": cfg.psd.processing_batch_size,
+            "note": "CPU-only deterministic transfer response plus calibration-bank diagnostics",
+        }
+    codec = runner.load_codec(cfg, allow_synthetic=args.allow_synthetic_basis)
+    bank = _calibration_bank(cfg, height=height, width=width)
+    gate = cfg.psd.gate_candidates[0]
+    results = [
+        expected_rms.calibrate(
+            codec, bank,
+            group_id=group.group_id,
+            group_indices=tuple(manifests.pc_group_by_id(group.group_id).indices),
+            tau_plus_candidates=group.tau_plus_candidates,
+            tau_minus_candidates=group.tau_minus_candidates,
+            targets=group.target_relative_l2,
+            gate_r_s=gate.r_s,
+            gate_beta=gate.beta,
+            num_bins=cfg.psd.num_bins,
+            batch_size=cfg.psd.processing_batch_size,
+            injection_dtype=cfg.model.dtype,
+            condition_number_threshold=cfg.psd.condition_number_threshold,
+            minimum_covariance_distance=cfg.psd.minimum_covariance_distance,
+            configured_tolerance=group.effect_target_tolerance,
+        )
+        for group in cfg.psd.groups
+    ]
+    operator_objects = tuple(operator for result in results for operator in result.operators)
+    try:
+        pairs = expected_rms.validate_operator_pairs(operator_objects) if operator_objects else ()
+    except ValueError as exc:
+        raise CliError(f"calibration produced an invalid candidate/control registry: {exc}") from exc
+    frozen = {
+        operator.condition_id: expected_rms.operator_to_payload(operator)
+        for operator in operator_objects
+    }
+    candidates = [expected_rms.operator_to_payload(pair.candidate) for pair in pairs]
+    controls = [expected_rms.operator_to_payload(pair.control) for pair in pairs]
+    pair_condition_ids = [
+        [pair.candidate.condition_id, pair.control.condition_id]
+        for pair in pairs
+    ]
+    exclusions = [item for result in results for item in _jsonable(result.exclusions)]
+    status = "SELECTED" if pairs and all(result.status == "SELECTED" for result in results) else "FAIL"
+    _, bin_index = spectral.radial_bin_index(height, width, cfg.psd.num_bins, rfft=True)
+    counts = torch.zeros(cfg.psd.num_bins, dtype=torch.float64).scatter_add_(
+        0, bin_index.reshape(-1),
+        spectral.rfft_conjugate_weights(width).view(1, -1).expand(height, -1).reshape(-1),
+    )
+    payload = {
+        "status": status,
+        "protocol": cfg.psd.protocol,
+        "operator_schema_version": expected_rms.OPERATOR_SCHEMA_VERSION,
+        "diagnostic_version": expected_rms.DIAGNOSTIC_VERSION,
+        "binning": {
+            **spectral.radial_binning_metadata(height, width, cfg.psd.num_bins),
+            "counts": counts.tolist(),
+            "count_sum": float(counts.sum()),
+        },
+        "gate": _jsonable(gate),
+        "latent_shape": [cfg.basis.channels, height, width],
+        "operator_dtype": "float32",
+        "injection_dtype": cfg.model.dtype,
+        "bank": {
+            "role": "calibration", "seed": cfg.psd.calibration_bank_seed,
+            "size": cfg.psd.calibration_bank_size,
+            "processing_batch_size": cfg.psd.processing_batch_size,
+        },
+        "basis_hash": runner.basis_hash_for(cfg),
+        "config_hash": file_hash(cfg.config_path),
+        "config_path": str(cfg.config_path),
+        "pc_groups": {
+            group.group_id: list(manifests.pc_group_by_id(group.group_id).indices)
+            for group in cfg.psd.groups
+        },
+        "reference": {
+            "same_phase_alpha": cfg.frozen.same_phase_alpha,
+            "same_phase_gamma": cfg.frozen.same_phase_gamma,
+            "reference_scale_profile": cfg.frozen.reference_scale_profile,
+        },
+        "selections": [item for result in results for item in _jsonable(result.selections)],
+        "attempted_taus": {group.group_id: _jsonable(result.attempted_taus) for group, result in zip(cfg.psd.groups, results)},
+        "operator_diagnostics": [item for result in results for item in _jsonable(result.diagnostics)],
+        "frozen_operators": frozen,
+        "valid_operator_pairs": pair_condition_ids,
+        "condition_exclusions": exclusions,
+        "all_targets_reached": all(result.all_targets_reached for result in results),
+        "unreachable_target_count": sum(result.unreachable_target_count for result in results),
+        "code_source": {
+            "module": "pc_specific_psd.expected_rms",
+            "operator_schema_version": expected_rms.OPERATOR_SCHEMA_VERSION,
+            "files": {
+                "expected_rms.py": file_hash(Path(expected_rms.__file__)),
+                "psd_editor.py": file_hash(Path(psd_editor.__file__)),
+                "spectral.py": file_hash(Path(spectral.__file__)),
+                "runner.py": file_hash(Path(runner.__file__)),
+            },
+        },
+    }
+    path = config.write_expected_rms_calibration_registry(cfg, payload)
+    return {
+        "status": status,
+        "calibration_profile": expected_rms.CALIBRATION_PROFILE,
+        "calibration_result_path": str(path),
+        "candidate_condition_ids": sorted(raw["condition_id"] for raw in candidates),
+        "control_condition_ids": sorted(raw["condition_id"] for raw in controls),
+        "valid_operator_pairs": pair_condition_ids,
+        "condition_exclusions": exclusions,
+        "selections": payload["selections"],
+    }
+
+
+def _cmd_validate_noise_expected_rms(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    """Validate frozen candidate/control operators on the independent bank."""
+    output_path = cfg.resolve_root(cfg.psd.validation_result_path)
+    if args.dry_run:
+        return {
+            "status": "dry-run", "output_path": str(output_path),
+            "bank_seed": cfg.psd.validation_bank_seed, "bank_size": cfg.psd.validation_bank_size,
+            "processing_batch_size": cfg.psd.processing_batch_size,
+            "note": "CPU-only; no model load and no operator refitting",
+        }
+    registry_path = cfg.resolve_root(cfg.psd.calibration_result_path)
+    registry = read_json(registry_path)
+    current_config_hash = file_hash(cfg.config_path)
+    if registry.get("config_hash") != current_config_hash:
+        raise CliError("expected_rms_v1 calibration registry is stale relative to the current config; run calibrate again")
+    codec = runner.load_codec(cfg, allow_synthetic=args.allow_synthetic_basis)
+    current_basis_hash = runner.basis_hash_for(cfg)
+    if registry.get("basis_hash") != current_basis_hash:
+        raise CliError("expected_rms_v1 calibration registry is stale relative to the formal basis")
+    operators = runner.load_expected_rms_operators(cfg)
+    pairs = expected_rms.validate_operator_pairs(tuple(operators.values()))
+    height = cfg.generation.config.height // 8
+    width = cfg.generation.config.width // 8
+    bank = _validation_bank(cfg, height=height, width=width)
+    reference_response = spectral.linear_operator_frequency_response(
+        psd_editor.apply_psd_edit_tau_zero, cfg.basis.channels, height, width
+    )
+    reference_energy = spectral.expected_mean_square_from_frequency_response(reference_response, width=width)
+    reference = expected_rms.reference_operator(cfg.basis.channels, height, width, cfg.psd.num_bins)
+    reference_construction = expected_rms.OperatorConstruction(
+        operator=reference,
+        response=reference_response,
+        radial_psd=spectral.expected_radial_psd_from_frequency_response(
+            reference_response, width=width, num_bins=cfg.psd.num_bins
+        ),
+    )
+    reference_diagnostic = expected_rms.diagnose_operator(
+        codec, bank, reference_construction, reference_response,
+        batch_size=cfg.psd.processing_batch_size, injection_dtype=cfg.model.dtype,
+        condition_number_threshold=cfg.psd.condition_number_threshold,
+        minimum_covariance_distance=cfg.psd.minimum_covariance_distance,
+    )
+    diagnostics: dict[str, Any] = {}
+    constructions: dict[str, expected_rms.OperatorConstruction] = {}
+    for condition_id, operator in operators.items():
+        construction = expected_rms.construction_for_frozen_operator(codec, operator)
+        constructions[condition_id] = construction
+        diagnostic = expected_rms.diagnose_operator(
+            codec, bank, construction, reference_response,
+            batch_size=cfg.psd.processing_batch_size,
+            injection_dtype=cfg.model.dtype,
+            condition_number_threshold=cfg.psd.condition_number_threshold,
+            minimum_covariance_distance=cfg.psd.minimum_covariance_distance,
+        )
+        energy_relative_error = abs(construction.radial_psd.total_expected_mean_square - reference_energy) / reference_energy
+        group = next(group for group in cfg.psd.groups if group.group_id == operator.group_id)
+        target_checks = [
+            {
+                "target": target,
+                "tolerance": calibration_v2.target_tolerance(target, group.effect_target_tolerance),
+                "target_within_tolerance": abs(diagnostic.paired_relative_l2_final_fp32 - target)
+                <= calibration_v2.target_tolerance(target, group.effect_target_tolerance),
+            }
+            for target in operator.target_relative_l2
+        ] if operator.operator_type == "pca_candidate" else []
+        numerically_valid = diagnostic.status == "accepted" and energy_relative_error <= 1e-5
+        diagnostics[condition_id] = {
+            "numerically_valid": numerically_valid,
+            "operator_hash": expected_rms.operator_hash(operator),
+            "actual_relative_l2": diagnostic.paired_relative_l2_final_fp32,
+            "target_checks": target_checks,
+            "expected_energy_relative_error": energy_relative_error,
+            "diagnostics": _jsonable(diagnostic),
+        }
+    for condition_id, operator in operators.items():
+        if operator.operator_type != "fourier_control":
+            continue
+        candidate = constructions[operator.candidate_id]
+        control = constructions[condition_id]
+        nonempty = candidate.radial_psd.counts > 0
+        denominator = candidate.radial_psd.power[nonempty].abs().clamp(min=1e-30)
+        match_error = float(((control.radial_psd.power[nonempty] - candidate.radial_psd.power[nonempty]).abs() / denominator).max())
+        diagnostics[condition_id]["candidate_annular_psd_match_max_relative_error"] = match_error
+        diagnostics[condition_id]["numerically_valid"] = diagnostics[condition_id]["numerically_valid"] and match_error <= expected_rms.DEFAULT_ANNULAR_MATCH_TOLERANCE
+    valid_condition_ids: list[str] = []
+    valid_operator_pairs: list[list[str]] = []
+    exclusions: list[dict[str, Any]] = []
+
+    def own_failure_reason(condition_id: str) -> str:
+        row = diagnostics[condition_id]
+        diagnostic = row["diagnostics"]
+        if diagnostic["status"] != "accepted":
+            return diagnostic["failure_reason"] or "operator_numerical_validation_failed"
+        if row["expected_energy_relative_error"] > 1e-5:
+            return (
+                "expected_energy_relative_error_exceeded: "
+                f"{row['expected_energy_relative_error']:.6g}"
+            )
+        match_error = row.get("candidate_annular_psd_match_max_relative_error")
+        if match_error is not None and match_error > expected_rms.DEFAULT_ANNULAR_MATCH_TOLERANCE:
+            return f"candidate_annular_psd_match_failed: {match_error:.6g}"
+        return "operator_numerical_validation_failed"
+
+    for pair in pairs:
+        candidate_id = pair.candidate.condition_id
+        control_id = pair.control.condition_id
+        candidate_ok = diagnostics[candidate_id]["numerically_valid"]
+        control_ok = diagnostics[control_id]["numerically_valid"]
+        if candidate_ok and control_ok:
+            valid_operator_pairs.append([candidate_id, control_id])
+            valid_condition_ids.extend((candidate_id, control_id))
+            diagnostics[candidate_id]["preview_eligible"] = True
+            diagnostics[control_id]["preview_eligible"] = True
+            continue
+        candidate_reason = (
+            own_failure_reason(candidate_id)
+            if not candidate_ok
+            else f"paired control {control_id!r} failed numerical validation"
+        )
+        control_reason = (
+            own_failure_reason(control_id)
+            if not control_ok
+            else f"paired candidate {candidate_id!r} failed numerical validation"
+        )
+        diagnostics[candidate_id]["preview_eligible"] = False
+        diagnostics[candidate_id]["pair_exclusion_reason"] = candidate_reason
+        diagnostics[control_id]["preview_eligible"] = False
+        diagnostics[control_id]["pair_exclusion_reason"] = control_reason
+        exclusions.extend((
+            {
+                "condition_id": candidate_id,
+                "paired_condition_id": control_id,
+                "stage": "validation",
+                "reason": candidate_reason,
+            },
+            {
+                "condition_id": control_id,
+                "paired_condition_id": candidate_id,
+                "stage": "validation",
+                "reason": control_reason,
+            },
+        ))
+    validation = {
+        "status": "PASS" if valid_operator_pairs else "FAIL",
+        "calibration_profile": expected_rms.CALIBRATION_PROFILE,
+        "energy_constraint": expected_rms.ENERGY_CONSTRAINT,
+        "diagnostic_version": expected_rms.DIAGNOSTIC_VERSION,
+        "diagnostic_versions": spectral.diagnostic_definition_versions(),
+        "bank": {
+            "role": "validation", "seed": cfg.psd.validation_bank_seed,
+            "size": cfg.psd.validation_bank_size,
+            "processing_batch_size": cfg.psd.processing_batch_size,
+        },
+        "calibration_result_path": str(registry_path),
+        "config_hash": current_config_hash,
+        "basis_hash": current_basis_hash,
+        "calibration_hash": file_hash(registry_path),
+        "reference_diagnostics": _jsonable(reference_diagnostic),
+        "valid_operator_pairs": valid_operator_pairs,
+        "preview_condition_ids": valid_condition_ids,
+        "condition_exclusions": exclusions,
+        "conditions": diagnostics,
+    }
+    write_json(output_path, validation)
+    return {**validation, "output_path": str(output_path)}
+
+
 def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     """Cache-only replay-and-check: reloads the frozen calibration registry
     and re-runs ``calibration.evaluate_candidate`` against a freshly
@@ -528,6 +822,8 @@ def _cmd_validate_noise(cfg: config.PCASpecificPSDConfig, args: argparse.Namespa
     load, no new generation, mirroring ``noise_init/noise_validation.py``'s
     standalone pattern.
     """
+    if cfg.psd.calibration_profile == config.EXPECTED_RMS_CALIBRATION_PROFILE:
+        return _cmd_validate_noise_expected_rms(cfg, args)
     if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
         return _cmd_validate_noise_effect_v2(cfg, args)
     height = cfg.generation.config.height // 8
@@ -599,6 +895,7 @@ def _cmd_validate_noise_effect_v2(cfg: config.PCASpecificPSDConfig, args: argpar
     validation = {
         "status": "PASS" if all_passed and results else "FAIL",
         "calibration_profile": config.EFFECT_CALIBRATION_PROFILE,
+        "diagnostic_versions": spectral.diagnostic_definition_versions(),
         "bank": {"role": "validation", "seed": cfg.psd.validation_bank_seed, "size": cfg.psd.validation_bank_size},
         "calibration_result_path": str(registry_path),
         "config_hash": current_config_hash,
@@ -611,6 +908,28 @@ def _cmd_validate_noise_effect_v2(cfg: config.PCASpecificPSDConfig, args: argpar
 
 
 def _cmd_generate_psd(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
+    if cfg.psd.calibration_profile == config.EXPECTED_RMS_CALIBRATION_PROFILE:
+        if args.stage != "preview":
+            raise CliError(
+                "expected_rms_v1 is limited to the development preview; freeze confirmatory "
+                "metrics and success criteria before enabling a full run"
+            )
+        registry = config.load_calibration_registry(cfg)
+        validation_path = cfg.resolve_root(cfg.psd.validation_result_path)
+        validation = read_json(validation_path) if validation_path is not None and validation_path.exists() else {}
+        condition_ids = tuple(validation.get("preview_condition_ids", registry.frozen_operators))
+        entries = manifests.build_expected_rms_preview_manifest_entries(condition_ids)
+        if args.dry_run:
+            return {
+                "status": "dry-run", "stage": "preview",
+                "condition_ids": list(condition_ids), "image_count": len(entries),
+                "maximum_image_count": 108,
+            }
+        run_dir = runner.generate_expected_rms_preview(
+            cfg, condition_ids, run_id=args.run_id, force=args.force,
+            allow_synthetic_basis=args.allow_synthetic_basis,
+        )
+        return {"status": "ok", "stage": "preview", "run_dir": str(run_dir), "image_count": len(entries)}
     if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
         if args.stage != "preview":
             raise CliError(
@@ -674,6 +993,38 @@ def _cmd_generate_psd(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace
 def _cmd_export_preview_review(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
     review_path = Path(args.review_output) if args.review_output else _default_path(cfg, "preview_review_template.json")
     mapping_path = Path(args.mapping_output) if args.mapping_output else _default_path(cfg, "preview_review_mapping.json")
+    if cfg.psd.calibration_profile == config.EXPECTED_RMS_CALIBRATION_PROFILE:
+        validation_path = cfg.resolve_root(cfg.psd.validation_result_path)
+        validation = read_json(validation_path) if validation_path is not None and validation_path.exists() else {}
+        condition_ids = tuple(validation.get("preview_condition_ids", config.load_calibration_registry(cfg).frozen_operators))
+        entries = manifests.build_expected_rms_preview_manifest_entries(condition_ids)
+        grid_path = review_path.with_name(f"{cfg.run.name}_preview_grid.png")
+        if args.dry_run:
+            return {"status": "dry-run", "image_count": len(entries), "grid_path": str(grid_path)}
+        blind_rows, mapping = review.export_expected_rms_preview_review(entries)
+        write_json(review_path, list(blind_rows))
+        write_json(mapping_path, _jsonable(mapping))
+        run_dir = cfg.resolve_root(cfg.run.outputs_root) / (args.run_id or f"{cfg.run.name}_preview")
+        registry_payload = read_json(cfg.resolve_root(cfg.psd.calibration_result_path))
+        labels = {}
+        for condition_id in condition_ids:
+            operator = registry_payload["frozen_operators"][condition_id]
+            actual = validation.get("conditions", {}).get(condition_id, {}).get("actual_relative_l2")
+            detail = (
+                f"{operator['operator_type']} tau={operator['tau']:.6g} "
+                f"cal={operator.get('calibration_relative_l2')} val={actual}"
+            )
+            if operator["operator_type"] == "pca_candidate":
+                detail += f" scale={operator['scale']:.6g}"
+            else:
+                detail += f" matched={operator['candidate_id']}"
+            labels[condition_id] = f"{condition_id}\n{detail}"
+        review.export_effect_preview_grid(run_dir, condition_ids, grid_path, condition_labels=labels)
+        return {
+            "status": "ok", "review_template_path": str(review_path),
+            "mapping_path": str(mapping_path), "grid_path": str(grid_path),
+            "image_count": len(blind_rows),
+        }
     if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
         condition_ids = tuple(config.load_calibration_registry(cfg).condition_selections)
         entries = manifests.build_effect_preview_manifest_entries(condition_ids)
@@ -715,7 +1066,12 @@ def _cmd_ingest_preview_review(cfg: config.PCASpecificPSDConfig, args: argparse.
         raise CliError("ingest-preview-review requires --review-file and --mapping-file")
     mapping = _load_mapping(Path(args.mapping_file), review.PreviewReviewMappingEntry)
     raw_rows = read_json(Path(args.review_file))
-    rows = review.ingest_preview_review(raw_rows, expected_image_ids=tuple(m.image_id for m in mapping))
+    ingest = (
+        review.ingest_expected_rms_preview_review
+        if cfg.psd.calibration_profile == config.EXPECTED_RMS_CALIBRATION_PROFILE
+        else review.ingest_preview_review
+    )
+    rows = ingest(raw_rows, expected_image_ids=tuple(m.image_id for m in mapping))
     write_json(output_path, _jsonable(rows))
     return {"status": "ok", "output_path": str(output_path), "row_count": len(rows)}
 
@@ -815,10 +1171,11 @@ def _cmd_analyze(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> 
 
 
 def _cmd_workflow(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace) -> dict:
-    if cfg.psd.calibration_profile == config.EFFECT_CALIBRATION_PROFILE:
+    if cfg.psd.calibration_profile in (config.EFFECT_CALIBRATION_PROFILE, config.EXPECTED_RMS_CALIBRATION_PROFILE):
         raise CliError(
-            "workflow does not support effect_size_v2; run basis-stability, calibrate, "
-            "validate-noise, generate-psd --stage preview, and export-preview-review in order"
+            f"workflow does not support {cfg.psd.calibration_profile}; run validate-config, "
+            "basis-stability, calibrate, validate-noise, generate-psd --stage preview, "
+            "and export-preview-review in order"
         )
     return workflow.run_workflow(
         args.config,

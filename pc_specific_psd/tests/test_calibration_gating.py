@@ -196,6 +196,11 @@ class CalibrationRegistryRoundTripTests(unittest.TestCase):
                 group_taus={"B5": (1.0, -1.0)},
             )
             self.assertTrue(written_path.exists())
+            payload = json.loads(written_path.read_text())
+            self.assertEqual(
+                set(payload["diagnostic_versions"]),
+                {"radial_psd", "conditioning"},
+            )
             registry = config.load_calibration_registry(loaded)
             self.assertTrue(registry.loaded)
             self.assertEqual(registry.status, "SELECTED")

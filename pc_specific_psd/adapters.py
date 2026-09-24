@@ -27,6 +27,7 @@ directly by this package's own callers, never through that generic protocol.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,26 @@ class RevisionProvenance:
     resolved_commit_hash: str | None
 
 
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _tensor_summary(tensor: torch.Tensor) -> dict[str, object]:
+    value = tensor.detach().to("cpu", torch.float32)
+    return {
+        "shape": list(value.shape),
+        "dtype": str(tensor.dtype),
+        "mean": float(value.mean()),
+        "standard_deviation": float(value.std(unbiased=False)),
+        "rms": float(value.square().mean().sqrt()),
+        "minimum": float(value.min()),
+        "maximum": float(value.max()),
+    }
+
+
 def _quick_tensor_hash(tensor: torch.Tensor) -> str:
     # Deliberately duplicated from noise_init/model_adapters.py's private
     # helper of the same name rather than imported: compat_generation.py only
@@ -122,6 +143,8 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
         self.revision_provenance: RevisionProvenance | None = None
         self.last_pair_keys: list[tuple[object, ...]] = []
         self.last_generator_seeds: list[int] = []
+        self.last_prepare_latents_return_hashes: list[str] = []
+        self.last_injection_record: dict[str, object] | None = None
 
     def _load(self) -> None:
         try:
@@ -216,6 +239,7 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
         self.last_generated_latent_hashes = []
         self.last_pair_keys = list(pair_keys)
         self.last_generator_seeds = []
+        self.last_prepare_latents_return_hashes = []
         images = []
         for index in range(latents.shape[0]):
             generator_seed = derived_seed(seed, PAIRED_GENERATOR_NAMESPACE, pair_keys[index])
@@ -223,6 +247,7 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
             images.append(self._call_one_paired(prompt, latents[index:index + 1], generation_config, generator))
             assert self.last_prepared_latent_hash is not None
             self.last_generated_latent_hashes.append(self.last_prepared_latent_hash)
+            self.last_prepare_latents_return_hashes.append(self.last_prepare_latents_return_hash)
             self.last_generator_seeds.append(generator_seed)
         return images
 
@@ -236,7 +261,7 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
         if original_prepare is None or not callable(original_prepare):
             raise RuntimeError("Pipeline has no callable prepare_latents; cannot verify initial-noise injection")
         signature = inspect.signature(original_prepare)
-        captured: dict[str, str | None] = {"hash": None}
+        captured: dict[str, object] = {"input_hash": None, "output_hash": None, "input": None, "output": None}
 
         def checked_prepare_latents(*args, **kwargs):
             try:
@@ -244,8 +269,13 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
             except TypeError:
                 received = kwargs.get("latents")
             if isinstance(received, torch.Tensor):
-                captured["hash"] = _quick_tensor_hash(received)
-            return original_prepare(*args, **kwargs)
+                captured["input_hash"] = _quick_tensor_hash(received)
+                captured["input"] = received.detach()
+            prepared = original_prepare(*args, **kwargs)
+            if isinstance(prepared, torch.Tensor):
+                captured["output_hash"] = _quick_tensor_hash(prepared)
+                captured["output"] = prepared.detach()
+            return prepared
 
         self.pipe.prepare_latents = checked_prepare_latents
         try:
@@ -262,11 +292,44 @@ class SDXLTurboAdapterPCA(SDXLTurboAdapter):
                 )
         finally:
             self.pipe.prepare_latents = original_prepare
-        self.last_prepared_latent_hash = captured["hash"]
-        if self.last_prepared_latent_hash is None:
+        self.last_prepare_latents_input_hash = captured["input_hash"]
+        self.last_prepare_latents_return_hash = captured["output_hash"]
+        # Compatibility alias: historically this field meant the tensor passed
+        # into prepare_latents, not its returned tensor.
+        self.last_prepared_latent_hash = self.last_prepare_latents_input_hash
+        if self.last_prepare_latents_input_hash is None:
             raise RuntimeError("Pipeline did not pass supplied latents to prepare_latents")
-        if self.last_prepared_latent_hash != self.last_supplied_latent_hash:
+        if self.last_prepare_latents_input_hash != self.last_supplied_latent_hash:
             raise RuntimeError("Pipeline prepare_latents received noise different from the supplied initial latent")
+        if self.last_prepare_latents_return_hash is None:
+            raise RuntimeError("Pipeline prepare_latents did not return a tensor")
+        prepared_input = captured["input"]
+        prepared_output = captured["output"]
+        scheduler = getattr(self.pipe, "scheduler", None)
+        self.last_injection_record = {
+            "operator_output_hash": _quick_tensor_hash(latent.detach().to(torch.float32)),
+            "submitted_tensor_hash": self.last_supplied_latent_hash,
+            "prepare_latents_input_hash": self.last_prepare_latents_input_hash,
+            "prepare_latents_return_hash": self.last_prepare_latents_return_hash,
+            "operator_output_statistics": _tensor_summary(latent),
+            "submitted_tensor_statistics": _tensor_summary(supplied),
+            "prepare_latents_input_statistics": _tensor_summary(prepared_input),
+            "prepare_latents_return_statistics": _tensor_summary(prepared_output),
+            "prepare_latents_return_shape": list(prepared_output.shape),
+            "scheduler_type": type(scheduler).__name__ if scheduler is not None else None,
+            "scheduler_init_noise_sigma": (
+                None if scheduler is None or getattr(scheduler, "init_noise_sigma", None) is None
+                else float(scheduler.init_noise_sigma)
+            ),
+            "torch_version": torch.__version__,
+            "diffusers_version": _package_version("diffusers"),
+            "model_checkpoint": self.model_config.get("checkpoint"),
+            "requested_revision": self.model_config.get("revision"),
+            "resolved_revision": (
+                self.revision_provenance.resolved_commit_hash
+                if self.revision_provenance is not None else None
+            ),
+        }
         image = result.images[0]
         if not isinstance(image, Image.Image):
             raise TypeError("Pipeline did not return a PIL image")

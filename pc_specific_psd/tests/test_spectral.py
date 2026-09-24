@@ -43,8 +43,49 @@ class RadialPSDParsevalTests(unittest.TestCase):
     def test_counts_cover_every_frequency_bin(self):
         height, width, num_bins = 10, 9, 6
         result = spectral.radial_psd(torch.randn(2, 3, height, width), num_bins)
-        n_rfft_cols = width // 2 + 1
-        self.assertEqual(int(result.counts.sum().item()), height * n_rfft_cols)
+        self.assertEqual(int(result.counts.sum().item()), height * width)
+
+
+    def test_annular_power_and_counts_match_full_fft_even_and_odd(self):
+        for height, width, num_bins in ((8, 10, 6), (7, 9, 5), (7, 10, 5)):
+            with self.subTest(height=height, width=width):
+                torch.manual_seed(height * 100 + width)
+                tensor = torch.randn(3, 2, height, width)
+                actual = spectral.radial_psd(tensor, num_bins)
+                fft = torch.fft.fft2(tensor.to(torch.float64), dim=(-2, -1))
+                grid_power = fft.abs().square().reshape(-1, height, width).mean(dim=0)
+                _, bins = spectral.radial_bin_index(height, width, num_bins, rfft=False)
+                counts = torch.zeros(num_bins, dtype=torch.float64).scatter_add_(
+                    0, bins.reshape(-1), torch.ones(height * width, dtype=torch.float64)
+                )
+                sums = torch.zeros(num_bins, dtype=torch.float64).scatter_add_(
+                    0, bins.reshape(-1), grid_power.reshape(-1)
+                )
+                expected = sums / counts.clamp(min=1)
+                torch.testing.assert_close(actual.counts, counts)
+                torch.testing.assert_close(actual.power, expected, atol=1e-9, rtol=1e-9)
+
+    def test_binning_metadata_records_edges_coordinates_and_band_ownership(self):
+        metadata = spectral.radial_binning_metadata(8, 10, 6)
+        self.assertEqual(metadata["version"], spectral.RADIAL_PSD_DEFINITION_VERSION)
+        self.assertEqual(len(metadata["bin_edges"]), 7)
+        self.assertEqual(len(metadata["frequency_coordinates"]["fy"]), 8)
+        self.assertEqual(len(metadata["frequency_coordinates"]["fx_rfft"]), 6)
+        ranges = [
+            (band["start_bin_inclusive"], band["end_bin_exclusive"])
+            for band in metadata["energy_bands"]
+        ]
+        self.assertEqual(tuple(ranges), spectral.low_mid_high_bin_ranges(6))
+        self.assertEqual(ranges[0][0], 0)
+        self.assertEqual(ranges[-1][1], 6)
+        self.assertIn("higher bin", metadata["boundary_rule"])
+        self.assertEqual(
+            spectral.diagnostic_definition_versions(),
+            {
+                "radial_psd": spectral.RADIAL_PSD_DEFINITION_VERSION,
+                "conditioning": spectral.CONDITIONING_DEFINITION_VERSION,
+            },
+        )
 
     def test_shift_invariance(self):
         torch.manual_seed(2)
@@ -101,6 +142,7 @@ class TransferMatrixDiagnosticsTests(unittest.TestCase):
             return t
 
         diag = spectral.impulse_response_transfer_matrix(identity_op, channels=4, height=8, width=8, num_freq_samples=12, seed=0)
+        self.assertEqual(diag.frequencies.shape[0], 8 * (8 // 2 + 1))
         torch.testing.assert_close(diag.singular_values, torch.ones_like(diag.singular_values), atol=1e-6, rtol=1e-6)
         self.assertAlmostEqual(diag.worst_condition_number, 1.0, places=5)
 
@@ -123,5 +165,23 @@ class TransferMatrixDiagnosticsTests(unittest.TestCase):
         torch.testing.assert_close(diag.singular_values, torch.full_like(diag.singular_values, scale), atol=1e-5, rtol=1e-5)
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+    def test_complete_grid_finds_a_single_bad_frequency(self):
+        height = width = 8
+        bad_row, bad_col = 7, 3
+
+        def sparse_bad_frequency(tensor):
+            spectrum = torch.fft.rfft2(tensor, dim=(-2, -1))
+            spectrum = spectrum.clone()
+            spectrum[:, 1, bad_row, bad_col] *= 1e-8
+            return torch.fft.irfft2(spectrum, s=(height, width), dim=(-2, -1))
+
+        diag = spectral.impulse_response_transfer_matrix(
+            sparse_bad_frequency, channels=2, height=height, width=width,
+            num_freq_samples=1, seed=0,
+        )
+        self.assertEqual(diag.frequencies.shape[0], height * (width // 2 + 1))
+        self.assertEqual(diag.worst_frequency, (bad_row, bad_col))
+        self.assertGreater(diag.worst_condition_number, 1e6)
+
+if __name__ == "__main__":    unittest.main()

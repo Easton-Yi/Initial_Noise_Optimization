@@ -25,10 +25,12 @@ class LoadConfigStructureTests(unittest.TestCase):
         path = Path(__file__).parents[1] / "configs" / "sdxl_turbo_pca_v2.yaml"
         loaded = config.load_config(path)
         self.assertEqual(loaded.psd.calibration_profile, config.EFFECT_CALIBRATION_PROFILE)
+        self.assertEqual(loaded.psd.energy_constraint, "radial_matched")
         self.assertEqual(len(loaded.psd.gate_candidates), 1)
         self.assertEqual(loaded.psd.groups[0].target_relative_l2, (0.05, 0.10))
         self.assertEqual(loaded.psd.groups[0].tau_plus_candidates, (0.5, 1.0, 2.0, 4.0))
         self.assertNotEqual(loaded.psd.calibration_bank_seed, loaded.psd.validation_bank_seed)
+
 
     def test_minimal_config_loads_with_needs_calibration_fields_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -39,6 +41,21 @@ class LoadConfigStructureTests(unittest.TestCase):
             self.assertIsNone(loaded.psd.protocol)
             self.assertEqual(loaded.psd.groups, ())
 
+    def test_checked_in_expected_rms_config_is_independent_and_fixed(self):
+        path = Path(__file__).parents[1] / "configs" / "sdxl_turbo_pca_expected_rms.yaml"
+        loaded = config.load_config(path)
+        self.assertEqual(loaded.psd.calibration_profile, config.EXPECTED_RMS_CALIBRATION_PROFILE)
+        self.assertEqual(loaded.psd.energy_constraint, "expected_rms")
+        self.assertEqual(loaded.psd.processing_batch_size, 8)
+        self.assertEqual(len(loaded.psd.gate_candidates), 1)
+        self.assertEqual((loaded.psd.gate_candidates[0].r_s, loaded.psd.gate_candidates[0].beta), (4.0, 2.0))
+        self.assertEqual(loaded.psd.groups[0].group_id, "B1")
+        self.assertEqual(loaded.psd.groups[0].target_relative_l2, (0.05, 0.10))
+        self.assertEqual(loaded.psd.groups[0].tau_plus_candidates, (0.25, 0.5, 1.0, 2.0))
+        self.assertEqual(loaded.psd.groups[0].tau_minus_candidates, (-0.25, -0.5, -1.0, -2.0))
+        config.validate_for_command(loaded, "calibrate")
+        self.assertNotEqual(loaded.psd.calibration_bank_seed, loaded.psd.validation_bank_seed)
+        self.assertNotIn("pca_v2", loaded.psd.calibration_result_path)
     def test_frozen_constants_are_echoed_regardless_of_yaml_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write_config(Path(tmp), MINIMAL_RAW)
