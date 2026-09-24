@@ -1009,16 +1009,26 @@ def _cmd_export_preview_review(cfg: config.PCASpecificPSDConfig, args: argparse.
         labels = {}
         for condition_id in condition_ids:
             operator = registry_payload["frozen_operators"][condition_id]
-            actual = validation.get("conditions", {}).get(condition_id, {}).get("actual_relative_l2")
-            detail = (
-                f"{operator['operator_type']} tau={operator['tau']:.6g} "
-                f"cal={operator.get('calibration_relative_l2')} val={actual}"
-            )
+            actual = validation.get("conditions", {}).get(
+                condition_id, {}
+            ).get("actual_relative_l2")
+            calibrated = operator.get("calibration_relative_l2")
+
+            cal_text = f"{calibrated:.1%}" if calibrated is not None else "NA"
+            val_text = f"{actual:.1%}" if actual is not None else "NA"
+            tau = operator["tau"]
             if operator["operator_type"] == "pca_candidate":
-                detail += f" scale={operator['scale']:.6g}"
+                labels[condition_id] = (
+                    f"PCA tau={tau:+g}\n"
+                    f"cal={cal_text} val={val_text}\n"
+                    f"scale={operator['scale']:.3f}"
+                )
             else:
-                detail += f" matched={operator['candidate_id']}"
-            labels[condition_id] = f"{condition_id}\n{detail}"
+                labels[condition_id] = (
+                    f"Fourier tau={tau:+g}\n"
+                    f"cal={cal_text} val={val_text}\n"
+                    "match=PCA"
+                )
         review.export_effect_preview_grid(run_dir, condition_ids, grid_path, condition_labels=labels)
         return {
             "status": "ok", "review_template_path": str(review_path),

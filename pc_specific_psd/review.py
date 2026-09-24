@@ -752,7 +752,10 @@ _CONTACT_SHEET_MARGIN = 8
 _CONTACT_SHEET_LABEL_HEIGHT = 16
 
 
-def _build_contact_sheet(cells: Sequence[Sequence[tuple[str, Optional[Path]]]]):
+def _build_contact_sheet(cells: Sequence[Sequence[tuple[str, Optional[Path]]]],
+    *,
+    cell_size: tuple[int, int] | None = None,
+    label_height: int | None = None,):
     """A grid of labeled thumbnails, one row per ``cells`` entry. Each cell is
     ``(label, image_path)``; ``image_path=None`` renders a blank gray
     placeholder (used when the referenced sample hasn't been generated,
@@ -763,8 +766,10 @@ def _build_contact_sheet(cells: Sequence[Sequence[tuple[str, Optional[Path]]]]):
 
     num_cols = max((len(row) for row in cells), default=0)
     num_rows = len(cells)
-    cell_w, cell_h = _CONTACT_SHEET_CELL_SIZE
-    cell_full_h = cell_h + _CONTACT_SHEET_LABEL_HEIGHT
+    cell_w, cell_h = cell_size or _CONTACT_SHEET_CELL_SIZE
+    cell_full_h = cell_h + (
+        _CONTACT_SHEET_LABEL_HEIGHT if label_height is None else label_height
+    )
     sheet_w = _CONTACT_SHEET_MARGIN + num_cols * (cell_w + _CONTACT_SHEET_MARGIN)
     sheet_h = _CONTACT_SHEET_MARGIN + num_rows * (cell_full_h + _CONTACT_SHEET_MARGIN)
     sheet = Image.new("RGB", (max(sheet_w, 1), max(sheet_h, 1)), color=(255, 255, 255))
@@ -777,11 +782,13 @@ def _build_contact_sheet(cells: Sequence[Sequence[tuple[str, Optional[Path]]]]):
             if image_path is not None and Path(image_path).exists():
                 with Image.open(image_path) as source:
                     thumb = source.convert("RGB").copy()
-                thumb.thumbnail(_CONTACT_SHEET_CELL_SIZE)
+                thumb.thumbnail((cell_w, cell_h))
                 sheet.paste(thumb, (x, y))
             else:
                 draw.rectangle([x, y, x + cell_w, y + cell_h], fill=(200, 200, 200))
-            draw.text((x, y + cell_h), label, fill=(0, 0, 0))
+            draw.multiline_text(
+                (x, y + cell_h + 2), label, fill=(0, 0, 0), spacing=2
+            )
 
     return sheet
 
@@ -801,16 +808,31 @@ def export_effect_preview_grid(
     ordered_conditions = ("reference", *tuple(dict.fromkeys(condition_ids)))
     cells = []
     for prompt, block in manifests.prompt_block_pairs():
-        cells.append([
-            (
-                f"{prompt.prompt_id}/{block.block_id}/" + (
-                    condition_labels.get(condition_id, condition_id) if condition_labels else condition_id
-                ),
-                Path(preview_run_dir) / "generations" / condition_id / block.block_id / "b0" / "image.png",
+        row = []
+        for condition_id in ordered_conditions:
+            if condition_labels is None:
+                label = f"{prompt.prompt_id}/{block.block_id}/{condition_id}"
+            elif condition_id == "reference":
+                label = f"{prompt.prompt_id}/{block.block_id}\nreference"
+            else:
+                label = condition_labels.get(condition_id, condition_id)
+
+            image_path = (
+                Path(preview_run_dir)
+                / "generations"
+                / condition_id
+                / block.block_id
+                / "b0"
+                / "image.png"
             )
-            for condition_id in ordered_conditions
-        ])
-    sheet = _build_contact_sheet(cells)
+            row.append((label, image_path))
+        cells.append(row)
+
+    sheet = _build_contact_sheet(
+        cells,
+        cell_size=(192, 192) if condition_labels is not None else None,
+        label_height=52 if condition_labels is not None else None,
+    )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, format="PNG")
