@@ -7,14 +7,18 @@ the zero-candidates refusal chain, and one real (non-dry-run) generation
 smoke test with a patched-in fake adapter.
 """
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from pc_specific_psd import cli, manifests
+import torch
+
+from pc_specific_psd import basis, cli, manifests
 from pc_specific_psd.compat_generation import read_json, write_json
 from pc_specific_psd.tests._runner_test_support import (
     FakeAdapterPCA,
@@ -77,6 +81,62 @@ class DryRunSmokeTests(unittest.TestCase):
         code, payload, _, _ = _run(["inspect-basis", "--config", self.config_path, "--allow-synthetic-basis"])
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "ok")
+
+    def test_build_basis_passes_configured_subspaces_and_serializes_report(self):
+        loaded = load_test_config(Path(self._tmp.name))
+        cfg = dataclasses.replace(
+            loaded,
+            basis=dataclasses.replace(
+                loaded.basis, dataset_manifest_path="manifest.json", num_leading_components=32,
+            ),
+        )
+        components_a = torch.eye(100)
+        components_b = components_a[:, [32, *range(1, 32), 0, *range(33, 100)]]
+
+        def make_basis(components):
+            return basis.PCABasis(
+                components=components,
+                eigenvalues=torch.arange(100, 0, -1, dtype=torch.float64),
+                mean=torch.zeros(100, dtype=torch.float64),
+                patch_size=5,
+                channels=4,
+                num_samples=20,
+                metadata={"synthetic": True},
+            )
+
+        built = make_basis(components_a)
+        stability = basis.compare_basis_subspaces(
+            built,
+            make_basis(components_b),
+            num_leading_components=32,
+            bands={group.group_id: tuple(group.indices) for group in manifests.PC_GROUPS},
+            split_seed=cfg.basis.split_seed,
+            num_images_a=10,
+            num_images_b=10,
+        )
+        adapter = mock.Mock()
+        with (
+            mock.patch.object(cli, "SDXLTurboAdapterPCA", return_value=adapter),
+            mock.patch.object(cli.basis_module, "load_dataset_manifest", return_value=mock.sentinel.manifest),
+            mock.patch.object(cli.basis_module, "build_pca_basis", return_value=built),
+            mock.patch.object(cli.basis_module, "split_half_stability", return_value=stability) as split_half,
+            mock.patch.object(cli.basis_module, "save_basis"),
+        ):
+            payload = cli._cmd_build_basis(cfg, SimpleNamespace(dry_run=False))
+
+        self.assertEqual(split_half.call_args.kwargs["num_leading_components"], 32)
+        self.assertEqual(
+            split_half.call_args.kwargs["bands"],
+            {group.group_id: tuple(group.indices) for group in manifests.PC_GROUPS},
+        )
+        report = payload["split_half_stability"]
+        self.assertIn("angles_leading", report)
+        self.assertIn("mean_angle_leading", report)
+        self.assertEqual(report["angle_unit"], "radians")
+        self.assertEqual(set(report["bands"]), {group.group_id for group in manifests.PC_GROUPS})
+        self.assertIn("boundary_eigenvalue_gap", report["bands"]["B1"])
+        self.assertEqual(report["split_seed"], cfg.basis.split_seed)
+        self.assertEqual((report["num_samples_a"], report["num_samples_b"]), (20, 20))
 
     def test_probe_dry_run_succeeds_with_needs_calibration_fields_unset(self):
         """The plan's verification step 4: probe --dry-run must succeed

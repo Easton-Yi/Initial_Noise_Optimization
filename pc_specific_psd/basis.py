@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import torch
 
@@ -246,9 +246,122 @@ def build_pca_basis(
 
 
 @dataclass(frozen=True)
+class EigenvalueGap:
+    boundary_after_pc_1based: int
+    absolute_a: float | None
+    absolute_b: float | None
+    relative_a: float | None
+    relative_b: float | None
+
+
+@dataclass(frozen=True)
+class BandSubspaceStability:
+    indices_0based: tuple[int, ...]
+    angles_radians: torch.Tensor
+    mean_angle_radians: float
+    max_angle_radians: float
+    boundary_eigenvalue_gap: EigenvalueGap
+
+
+@dataclass(frozen=True)
 class SplitHalfStability:
-    angles_full: torch.Tensor    # principal angles (radians) across the full d-dim comparison
-    max_angle_leading: float     # worst angle among the leading `num_leading_components`
+    # Kept for provenance only. Full square bases span the same ambient space
+    # and therefore cannot diagnose leading-PC stability.
+    angles_full: torch.Tensor
+    angles_leading: torch.Tensor
+    mean_angle_leading: float
+    max_angle_leading: float
+    leading_eigenvalue_gap: EigenvalueGap
+    bands: dict[str, BandSubspaceStability]
+    angle_unit: str
+    eigenvalue_gap_definition: str
+    split_seed: int
+    num_images_a: int
+    num_images_b: int
+    num_samples_a: int
+    num_samples_b: int
+
+
+def _boundary_eigenvalue_gap(
+    eigenvalues_a: torch.Tensor, eigenvalues_b: torch.Tensor, boundary_1based: int
+) -> EigenvalueGap:
+    """Gap after PC ``boundary_1based``: lambda_k - lambda_(k+1).
+
+    Relative gaps divide by ``abs(lambda_k)``.  The final ambient component
+    has no following eigenvalue and is reported as ``None`` rather than a
+    fabricated zero.
+    """
+    index = boundary_1based - 1
+    if index < 0 or index >= eigenvalues_a.numel() or index >= eigenvalues_b.numel():
+        raise ValueError("eigenvalue-gap boundary is outside the basis")
+    if index + 1 >= eigenvalues_a.numel() or index + 1 >= eigenvalues_b.numel():
+        return EigenvalueGap(boundary_1based, None, None, None, None)
+    gap_a = float(eigenvalues_a[index] - eigenvalues_a[index + 1])
+    gap_b = float(eigenvalues_b[index] - eigenvalues_b[index + 1])
+    denom_a = max(abs(float(eigenvalues_a[index])), 1e-30)
+    denom_b = max(abs(float(eigenvalues_b[index])), 1e-30)
+    return EigenvalueGap(boundary_1based, gap_a, gap_b, gap_a / denom_a, gap_b / denom_b)
+
+
+def compare_basis_subspaces(
+    basis_a: PCABasis,
+    basis_b: PCABasis,
+    *,
+    num_leading_components: int,
+    bands: Mapping[str, Sequence[int]] = (),
+    split_seed: int = 0,
+    num_images_a: int = 0,
+    num_images_b: int = 0,
+) -> SplitHalfStability:
+    """Compare leading and existing-band subspaces between two fitted bases.
+
+    Components are sliced *before* principal-angle calculation.  This is the
+    critical distinction from comparing two complete square bases and then
+    slicing their (necessarily near-zero) full-space angles.
+    """
+    d = basis_a.components.shape[1]
+    if basis_a.components.shape != basis_b.components.shape:
+        raise ValueError("split-half bases must have the same component shape")
+    if not 1 <= num_leading_components <= d:
+        raise ValueError("num_leading_components must be within the basis dimension")
+    angles_full = principal_angles(basis_a.components, basis_b.components)
+    angles_leading = principal_angles(
+        basis_a.components[:, :num_leading_components],
+        basis_b.components[:, :num_leading_components],
+    )
+    band_results: dict[str, BandSubspaceStability] = {}
+    for name, raw_indices in dict(bands).items():
+        indices = tuple(int(index) for index in raw_indices)
+        if not indices or len(set(indices)) != len(indices) or min(indices) < 0 or max(indices) >= d:
+            raise ValueError(f"band {name!r} has invalid component indices")
+        band_angles = principal_angles(
+            basis_a.components[:, list(indices)], basis_b.components[:, list(indices)]
+        )
+        gap = _boundary_eigenvalue_gap(basis_a.eigenvalues, basis_b.eigenvalues, max(indices) + 1)
+        band_results[name] = BandSubspaceStability(
+            indices_0based=indices,
+            angles_radians=band_angles,
+            mean_angle_radians=float(band_angles.mean()),
+            max_angle_radians=float(band_angles.max()),
+            boundary_eigenvalue_gap=gap,
+        )
+    return SplitHalfStability(
+        angles_full=angles_full,
+        angles_leading=angles_leading,
+        mean_angle_leading=float(angles_leading.mean()),
+        max_angle_leading=float(angles_leading.max()),
+        leading_eigenvalue_gap=_boundary_eigenvalue_gap(
+            basis_a.eigenvalues, basis_b.eigenvalues, num_leading_components
+        ),
+        bands=band_results,
+        angle_unit="radians",
+        eigenvalue_gap_definition="lambda_k - lambda_(k+1), relative gap divided by abs(lambda_k)",
+        split_seed=int(split_seed),
+        num_images_a=int(num_images_a),
+        num_images_b=int(num_images_b),
+        num_samples_a=basis_a.num_samples,
+        num_samples_b=basis_b.num_samples,
+    )
 
 
 def split_half_stability(
@@ -263,6 +376,7 @@ def split_half_stability(
     synthetic: bool,
     chunk_size: int = 64,
     num_leading_components: int | None = None,
+    bands: Mapping[str, Sequence[int]] = (),
 ) -> SplitHalfStability:
     """Image-disjoint split-half subspace stability check (plan §3.2/§14.3): builds
     two independent bases from disjoint image halves and reports how far apart
@@ -280,9 +394,16 @@ def split_half_stability(
         patches_per_image=patches_per_image, sampling_seed=sampling_seed,
         chunk_size=chunk_size, synthetic=synthetic,
     )
-    angles_full = principal_angles(basis_a.components, basis_b.components)
-    leading = angles_full[:num_leading_components] if num_leading_components else angles_full
-    return SplitHalfStability(angles_full=angles_full, max_angle_leading=float(leading.max()))
+    leading_count = num_leading_components or basis_a.components.shape[1]
+    return compare_basis_subspaces(
+        basis_a,
+        basis_b,
+        num_leading_components=leading_count,
+        bands=bands,
+        split_seed=split_seed,
+        num_images_a=len(first_half),
+        num_images_b=len(second_half),
+    )
 
 
 def save_basis(basis: PCABasis, path: str | Path) -> None:

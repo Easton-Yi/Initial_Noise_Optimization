@@ -219,6 +219,7 @@ def _stage_build_basis(cfg: config.PCASpecificPSDConfig, config_path: str, *, ge
         patches_per_image=cfg.basis.patches_per_image, sampling_seed=cfg.basis.sampling_seed,
         split_seed=cfg.basis.split_seed, synthetic=False,
         num_leading_components=cfg.basis.num_leading_components,
+        bands={group.group_id: tuple(group.indices) for group in manifests.PC_GROUPS},
     )
     basis_module.save_basis(built, output_path)
     if cfg.generation.release_model_after_generation:

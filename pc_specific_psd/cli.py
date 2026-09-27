@@ -177,6 +177,7 @@ def _cmd_build_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace)
         patches_per_image=cfg.basis.patches_per_image, sampling_seed=cfg.basis.sampling_seed,
         split_seed=cfg.basis.split_seed, synthetic=False,
         num_leading_components=cfg.basis.num_leading_components,
+        bands={group.group_id: tuple(group.indices) for group in manifests.PC_GROUPS},
     )
     basis_module.save_basis(built, output_path)
     if cfg.generation.release_model_after_generation:
@@ -186,7 +187,7 @@ def _cmd_build_basis(cfg: config.PCASpecificPSDConfig, args: argparse.Namespace)
         "basis_output_path": str(output_path),
         "num_samples": built.num_samples,
         "orthogonality_error": basis_module.orthogonality_error(built.components),
-        "split_half_max_angle_leading": stability.max_angle_leading,
+        "split_half_stability": _jsonable(stability),
     }
 
 

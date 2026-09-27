@@ -216,6 +216,60 @@ class BuildPCABasisTests(unittest.TestCase):
 
 
 class SplitHalfStabilityTests(unittest.TestCase):
+    @staticmethod
+    def _basis(components):
+        d = components.shape[0]
+        return basis.PCABasis(
+            components=components.to(torch.float32), eigenvalues=torch.arange(d, 0, -1, dtype=torch.float64),
+            mean=torch.zeros(d, dtype=torch.float64), patch_size=1, channels=d,
+            num_samples=20, metadata={"synthetic": True},
+        )
+
+    def test_full_spaces_can_match_while_leading_subspaces_differ(self):
+        identity = torch.eye(4)
+        swapped = identity[:, [2, 1, 0, 3]]
+        result = basis.compare_basis_subspaces(
+            self._basis(identity), self._basis(swapped), num_leading_components=1,
+            bands={"B1": (0,)}, split_seed=7, num_images_a=10, num_images_b=10,
+        )
+        self.assertLess(float(result.angles_full.max()), 1e-6)
+        self.assertAlmostEqual(result.max_angle_leading, float(torch.pi / 2), places=5)
+        self.assertEqual(result.split_seed, 7)
+
+    def test_sign_flip_and_within_band_rotation_preserve_subspace(self):
+        identity = torch.eye(4)
+        angle = 0.7
+        rotated = identity.clone()
+        rotated[:, :2] = identity[:, :2] @ torch.tensor([
+            [torch.cos(torch.tensor(angle)), -torch.sin(torch.tensor(angle))],
+            [torch.sin(torch.tensor(angle)), torch.cos(torch.tensor(angle))],
+        ])
+        rotated[:, 2] *= -1
+        result = basis.compare_basis_subspaces(
+            self._basis(identity), self._basis(rotated), num_leading_components=2,
+            bands={"first_two": (0, 1)},
+        )
+        self.assertLess(result.max_angle_leading, 5e-4)
+        self.assertLess(result.bands["first_two"].max_angle_radians, 5e-4)
+
+    def test_each_group_uses_its_own_columns_and_reports_metadata(self):
+        identity = torch.eye(6)
+        changed = identity[:, [0, 1, 4, 5, 2, 3]]
+        result = basis.compare_basis_subspaces(
+            self._basis(identity), self._basis(changed), num_leading_components=2,
+            bands={"stable": (0, 1), "changed": (2, 3)},
+            split_seed=11, num_images_a=8, num_images_b=9,
+        )
+
+        self.assertLess(result.bands["stable"].max_angle_radians, 1e-6)
+        self.assertAlmostEqual(result.bands["changed"].mean_angle_radians, float(torch.pi / 2), places=5)
+        self.assertEqual(result.bands["changed"].indices_0based, (2, 3))
+        self.assertEqual(result.angle_unit, "radians")
+        self.assertEqual(result.leading_eigenvalue_gap.boundary_after_pc_1based, 2)
+        self.assertEqual(result.bands["changed"].boundary_eigenvalue_gap.boundary_after_pc_1based, 4)
+        self.assertEqual((result.num_images_a, result.num_images_b), (8, 9))
+        self.assertEqual((result.num_samples_a, result.num_samples_b), (20, 20))
+
     def test_leading_subspace_is_reasonably_stable_for_smooth_data(self):
         manifest = _make_synthetic_manifest(120)
         encoder = _make_smooth_encoder(channels=1, height=10, width=10, base_seed=99)
