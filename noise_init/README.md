@@ -2,13 +2,13 @@
 
 This directory is a standalone implementation of the experiment in `docs/INITIAL_NOISE_QD_EXPERIMENT_SPEC.md`; it does not import code, models, or configuration from another checkout.
 
-The implementation was informed by the 2D `rfft2` pink-noise convention and verified FLUX.2 latent-packing behavior in the prior DivGen work, but implements these locally. It adds immutable block/noise provenance, matched white-floor methods, standalone evaluation, and block-level Q–D analysis. Model weights are cached locally in `noise_init/cache/` by default.
+The implementation was informed by the 2D `rfft2` pink-noise convention and verified FLUX.2 latent-packing behavior in the prior DivGen work, but implements these locally. It adds immutable block/noise provenance, two white-floor methods, standalone evaluation, and block-level Q–D analysis. Model weights are cached locally in `noise_init/cache/` by default.
 
-`alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default.
+`alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default. At intermediate gamma values, independent-white Design B additionally normalizes its pink component with that profile before mixing it with raw eta.
 
 The radial frequency grid uses DivGen-compatible integer FFT-bin coordinates (`fftfreq(H) * H`, `rfftfreq(W) * W`), not normalized cycles per pixel. Runs made with the earlier normalized-frequency implementation are invalid for this experiment; the grid version is recorded in every new run manifest and blocks metrics/analysis on mismatched prior runs.
 
-The formal normalization profile uses population standard deviation (`unbiased=False`) uniformly for every condition. `divgen_compat` is available only as a separately named compatibility profile, using DivGen/Notebook sample standard deviation (`unbiased=True`); never mix it with the formal profile on one curve. White endpoints bypass FFT/IFFT so `alpha=0` and same-phase `gamma=1` are exact saved-white references before shared normalization.
+The formal normalization profile uses population standard deviation (`unbiased=False`) for the shared final normalization and for Design B's additional pink-component normalization. `divgen_compat` is available only as a separately named compatibility profile, using DivGen/Notebook sample standard deviation (`unbiased=True`); never mix it with the formal profile on one curve. White endpoints bypass FFT/IFFT so `alpha=0` and same-phase `gamma=1` are exact saved-white references before shared normalization.
 
 ## Setup
 

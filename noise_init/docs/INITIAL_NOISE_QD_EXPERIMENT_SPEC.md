@@ -16,7 +16,7 @@ The implementation must answer three questions in order:
 
 1. Baseline: how do white noise and simple pink noise with different exponents affect image quality and within-prompt diversity?
 2. Same-phase PSD floor: across the full pink-exponent sweep, can restoring spectral power—especially suppressed high-frequency power—improve quality while retaining the diversity associated with pink-noise initialization?
-3. Independent-white replenishment: for the same expected PSD, does injecting independent Gaussian randomness behave differently from restoring amplitudes while retaining the base noise's Fourier phase?
+3. Independent-white replenishment: after normalizing the pink component before mixing, how does injecting independent Gaussian randomness compare with restoring amplitudes while retaining the base noise's Fourier phase?
 
 This specification covers direct generation from designed initial noise. It does **not** include DivGen/noise optimization in the first implementation. A fixed optimizer can be added later as a separate experimental factor without changing the data contract defined here.
 
@@ -170,34 +170,40 @@ $$
 
 Derive its seed from a separate deterministic namespace such as `sha256(master_seed, block_id, "independent_eta", i)`. Use the same saved $\eta$ samples for all relevant alpha and gamma conditions in that block.
 
-Construct:
+For intermediate $0<\gamma<1$, first normalize the pink component with the configured profile, then mix it with the raw independent white draw:
 
 $$
-\widehat z^{\mathrm{ind}}_{b,i,\alpha,\gamma}(r)
-=\sqrt{1-\gamma}\,H_\alpha(r)\widehat\epsilon_{b,i}(r)
-+\sqrt\gamma\,\widehat\eta_{b,i}(r).
+z^{\mathrm{pink,norm}}_{b,i,\alpha}
+=\operatorname{normalise}\!\left(z^{\mathrm{pink}}_{b,i,\alpha}\right),
 $$
 
-The equivalent spatial implementation is:
-
 $$
-z^{\mathrm{ind}}
-=\sqrt{1-\gamma}\,z^{\mathrm{pink}}
+z^{\mathrm{ind,pre}}
+=\sqrt{1-\gamma}\,z^{\mathrm{pink,norm}}
 +\sqrt\gamma\,\eta.
 $$
 
+Apply the same configured normalization once more to the completed mixture:
+
+$$
+z^{\mathrm{ind}}=\operatorname{normalise}\!\left(z^{\mathrm{ind,pre}}\right).
+$$
+
+The implementation bypasses the component-level normalization at the exact endpoints: at `gamma=0` it returns raw pink before the shared final normalization, and at `gamma=1` it returns raw $\eta$ before that normalization. This preserves exact correspondence with the baseline pink and normalized-$\eta$ endpoints.
+
 Properties that must be tested:
 
-- `gamma=0`: identical to the corresponding simple pink condition;
-- `gamma=1`: identical to the cached independent $\eta$ sample, not to $\epsilon$;
-- before optional normalization, the expected PSD matches the same-phase method when $\epsilon$ and $\eta$ are independent unit-variance Gaussian fields;
-- finite-sample spectra and phases need not match the same-phase method.
+- after final normalization, `gamma=0` is identical to the corresponding simple pink condition;
+- after final normalization, `gamma=1` is identical to the normalized cached independent $\eta$ sample, not to normalized $\epsilon$;
+- for intermediate gamma, the pink component is normalized before mixing and the completed mixture is normalized again;
+- intermediate-gamma Design B does not generally have the same PSD or distribution as Design A at matched alpha and gamma;
+- its pre-final-normalization expected PSD is derived from the normalized-pink and raw-$\eta$ component spectra, while finite-sample spectra also contain a random cross term.
 
 ### 4.5 Normalization policy
 
 Normalization is a scientifically important configuration, not an implementation detail.
 
-The primary matched-comparison profile should apply the same postprocessing function to every final latent, including white, pink, same-phase, and independent-white conditions:
+The primary matched-comparison profile applies the same final postprocessing function to every latent, including white, pink, same-phase, and independent-white conditions:
 
 ```text
 normalization = per_sample_per_channel_zero_mean_unit_std
@@ -209,13 +215,13 @@ $$
 z\leftarrow\frac{z-\mu(z)}{\sigma(z)+\varepsilon}.
 $$
 
-This removes mean/variance as uncontrolled differences and makes same-phase endpoint tests exact after the shared transformation.
+This removes final mean/variance as uncontrolled differences and makes endpoint tests exact after the shared transformation. Design B additionally applies this same profile to its pink component before mixing at intermediate gamma values.
 
 If strict compatibility with an existing DivGen implementation is required, support an explicitly named `divgen_compat` profile rather than silently changing behavior. Never combine results from different normalization profiles on one curve.
 
 The primary `per_sample_per_channel_zero_mean_unit_std` profile uses population standard deviation (`unbiased=False`). The explicitly named `divgen_compat` profile uses PyTorch's default sample standard deviation (`unbiased=True`) to match DivGen and the white/pink notebook. These profiles are separate experimental factors and must never be mixed in a formal curve.
 
-Record pre-normalization and post-normalization mean, standard deviation, L2 norm, and empirical radial PSD summary for every noise tensor.
+Record pre-final-normalization and post-final-normalization mean, standard deviation, L2 norm, and empirical radial PSD summary for every noise tensor. For Design B, the pre-final tensor already contains the internally normalized pink component.
 
 ## 5. Method parameter grids
 
@@ -360,6 +366,7 @@ experiment:
   master_seed: 20260825
   gallery_size: 4
   normalization_profile: per_sample_per_channel_zero_mean_unit_std
+  noise_construction_version: exact_white_endpoints_profiled_normalization_v2
 
 model:
   adapter: flux2_klein
@@ -675,8 +682,9 @@ An optional overall method envelope may be computed from all `(alpha, gamma)` po
 - all alpha/gamma conditions reference the same `base_noise_hash` for a given block and base index;
 - `same(alpha, gamma=0)` equals `pink(alpha)` within tolerance;
 - `same(alpha, gamma=1)` equals `white(base epsilon)` under the shared normalization policy;
-- `ind(alpha, gamma=0)` equals `pink(alpha)`;
-- `ind(alpha, gamma=1)` equals cached independent eta;
+- after shared final normalization, `ind(alpha, gamma=0)` equals `pink(alpha)`;
+- after shared final normalization, `ind(alpha, gamma=1)` equals normalized cached independent eta;
+- at intermediate gamma, `ind` equals final normalization of the mixture of normalized pink and raw eta, and differs from the old raw-pink mixture;
 - IFFT outputs are real and have the expected shape;
 - pre/post normalization statistics are finite;
 - an empirical PSD test over many synthetic samples confirms the target expected spectra within a stated tolerance.

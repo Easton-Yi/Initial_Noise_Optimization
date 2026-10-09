@@ -34,6 +34,18 @@ class NoiseMethodTests(unittest.TestCase):
         eta_norm = construct_noise(type(self.batch)(self.batch.independent_eta, self.batch.independent_eta, self.batch.eta_sample_seeds, self.batch.eta_sample_seeds, self.batch.eta_hashes, self.batch.eta_hashes), "baseline", 0., None, profile)
         self.assertTrue(torch.allclose(construct_noise(self.batch, "independent_white", .5, 1., profile), eta_norm, atol=2e-6))
 
+    def test_independent_white_normalizes_pink_before_mix_and_final_output_after_mix(self):
+        profile = "per_sample_per_channel_zero_mean_unit_std"
+        alpha, gamma = .5, .35
+        pink_raw = pink(self.batch.base_white, alpha)
+        pink_normalized = normalize(pink_raw, profile)
+        mixed_raw = (1. - gamma) ** .5 * pink_normalized + gamma ** .5 * self.batch.independent_eta
+        actual = construct_noise(self.batch, "independent_white", alpha, gamma, profile)
+        self.assertTrue(torch.allclose(actual, normalize(mixed_raw, profile), atol=2e-6))
+
+        old_order = normalize((1. - gamma) ** .5 * pink_raw + gamma ** .5 * self.batch.independent_eta, profile)
+        self.assertFalse(torch.allclose(actual, old_order, atol=2e-6))
+
     def test_primary_and_divgen_compat_normalization_are_separate(self):
         primary = normalize(self.batch.base_white, "per_sample_per_channel_zero_mean_unit_std")
         compat = normalize(self.batch.base_white, "divgen_compat")
@@ -72,9 +84,12 @@ class NoiseMethodTests(unittest.TestCase):
         self.assertLess(float(multiplier.min()), .11)
 
     def test_independent_spatial_and_frequency_formula_agree(self):
-        spatial = independent_white(self.batch.base_white, self.batch.independent_eta, .3, .4)
-        h = (1 + radial_frequency_grid(32, 40)).pow(-.3)
-        frequency = torch.fft.irfft2((1 - .4) ** .5 * torch.fft.rfft2(self.batch.base_white, dim=(-2, -1)) * h + .4 ** .5 * torch.fft.rfft2(self.batch.independent_eta, dim=(-2, -1)), s=(32, 40), dim=(-2, -1))
+        profile = "per_sample_per_channel_zero_mean_unit_std"
+        spatial = independent_white(self.batch.base_white, self.batch.independent_eta, .3, .4, profile)
+        pink_normalized = normalize(pink(self.batch.base_white, .3), profile)
+        frequency = torch.fft.irfft2((1 - .4) ** .5 * torch.fft.rfft2(pink_normalized, dim=(-2, -1))
+                                     + .4 ** .5 * torch.fft.rfft2(self.batch.independent_eta, dim=(-2, -1)),
+                                     s=(32, 40), dim=(-2, -1))
         self.assertTrue(torch.allclose(spatial, frequency, atol=2e-5))
 
     def test_cache_is_hash_checked_and_reused(self):

@@ -16,7 +16,7 @@ from analysis import analyze_run
 from io_utils import alpha_token, condition_id, ensure_immutable_run, file_hash, read_json, read_jsonl, tensor_hash, write_json, write_jsonl
 from metric_runner import evaluate_run
 from model_adapters import GenerationConfig, T2IModelAdapter, build_adapter
-from noise_methods import construct_noise, load_or_create_noise_batch, noise_statistics
+from noise_methods import construct_noise, construct_raw_noise, load_or_create_noise_batch, noise_statistics
 
 
 REQUIRED_TOP_LEVEL = {"experiment", "model", "generation", "blocks", "baseline", "same_phase_floor", "independent_white", "quality_metrics", "diversity_metrics", "analysis"}
@@ -182,7 +182,7 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
                                 "image_path": str(target.resolve()), "image_hash": file_hash(target), "generation_config_hash": _generation_hash(config)})
             _save_grid(images, sample_dir / "grid_1x4.png")
             write_jsonl(sample_dir / "samples.jsonl", records)
-            write_json(sample_dir / "noise_statistics.json", {"pre_normalization": noise_statistics(_raw_noise(batch, condition)), "post_normalization": noise_statistics(latents)})
+            write_json(sample_dir / "noise_statistics.json", {"pre_normalization": noise_statistics(_raw_noise(batch, condition, config["experiment"]["normalization_profile"])), "post_normalization": noise_statistics(latents)})
     if config["generation"].get("release_model_after_generation", True): adapter.close()
     return run_dir
 
@@ -212,12 +212,13 @@ def _write_same_phase_white_alias(run_dir: Path, model_id: str, block: dict[str,
                         "alias_of_condition_id": source_condition.identifier, "alias_of_image_path": source["image_path"], "is_exact_alias": True})
     write_jsonl(target_dir / "samples.jsonl", records)
     write_json(target_dir / "noise_statistics.json", {"alias_of_condition_id": source_condition.identifier,
-               "pre_normalization": noise_statistics(_raw_noise(batch, condition)), "post_normalization": noise_statistics(latents)})
+               "pre_normalization": noise_statistics(_raw_noise(batch, condition, config["experiment"]["normalization_profile"])), "post_normalization": noise_statistics(latents)})
 
 
-def _raw_noise(batch, condition: Condition) -> torch.Tensor:
-    # Build with no post-processing purely for provenance statistics.
-    return construct_noise(batch, condition.family, condition.alpha, condition.gamma, "none")
+def _raw_noise(batch, condition: Condition, normalization_profile: str) -> torch.Tensor:
+    # Build immediately before the shared final normalization. For Design B,
+    # this already includes normalization of the pink component before mixing.
+    return construct_raw_noise(batch, condition.family, condition.alpha, condition.gamma, normalization_profile)
 
 
 def _generation_hash(config: dict[str, Any]) -> str:
