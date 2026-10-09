@@ -253,11 +253,6 @@ def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str,
     # validating against it would silently select alpha/gamma values this run
     # never actually produced.
     _select_two_panel_display(config, alpha_range, gamma_range)
-    write_json(run_dir / "analysis" / "analysis_manifest.json", {
-        "source_run_config_hash": manifest.get("config_hash"),
-        "frozen_statistical_analysis": frozen["analysis"],
-        "presentation_analysis": {"primary_metric_pair": config["analysis"]["primary_metric_pair"], "optional_detail_curves": config["analysis"]["optional_detail_curves"], "two_panel_display": config["analysis"]["two_panel_display"]},
-    })
     return config
 
 

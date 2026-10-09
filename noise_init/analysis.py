@@ -7,6 +7,9 @@ from typing import Any
 
 import numpy as np
 
+from io_utils import read_json, write_json
+from result_integrity import enabled_metric_names, validate_analysis_inputs
+
 
 def pareto_frontier(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep non-dominated points when both diversity and quality are maximized."""
@@ -34,11 +37,15 @@ def interpolate_within(points: list[dict[str, Any]], diversity: float) -> float 
 
 def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
     run_dir, analysis_dir = Path(run_dir), Path(run_dir) / "analysis"
+    contract = validate_analysis_inputs(run_dir)
     group_rows = _read_csv(run_dir / "metrics" / "per_group.csv")
     if not group_rows:
         raise RuntimeError("Metrics have not been computed")
-    quality_metrics = ["clip_cosine", "hpsv3"]
-    diversity_metrics = ["dreamsim_mean_pair_distance", "lpips_alex_mean_pair_distance", "vendi_clip"]
+    quality_metrics, pairwise_metrics, group_only_metrics = enabled_metric_names(contract.config)
+    diversity_metrics = pairwise_metrics + group_only_metrics
+    if not quality_metrics or not diversity_metrics:
+        raise RuntimeError("Analysis requires at least one enabled quality and diversity metric")
+    frozen_analysis = contract.config["analysis"]
     by_metric: dict[str, dict[tuple[str, str], dict[str, dict[str, Any]]]] = {}
     for row in group_rows:
         key = (row["block_id"], row["condition_id"])
@@ -59,7 +66,7 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                 if not blocks: continue
                 q = np.array([values[(block, condition)][quality] for block in sorted(blocks)])
                 d = np.array([values[(block, condition)][diversity] for block in sorted(blocks)])
-                q_interval, d_interval = _bootstrap(q, config["analysis"]), _bootstrap(d, config["analysis"])
+                q_interval, d_interval = _bootstrap(q, frozen_analysis), _bootstrap(d, frozen_analysis)
                 condition_meta = _condition_metadata(metadata[(next(iter(blocks)), condition)])
                 aggregates.append({"condition_id": condition, "quality_metric": quality, "diversity_metric": diversity, "quality": q.mean(), "diversity": d.mean(), "block_count": len(blocks), "quality_se": q_interval["standard_error"], "diversity_se": d_interval["standard_error"], "quality_ci_low": q_interval["ci_low"], "quality_ci_high": q_interval["ci_high"], "diversity_ci_low": d_interval["ci_low"], "diversity_ci_high": d_interval["ci_high"], **condition_meta, "curve_id": _curve_id(condition_meta)})
             curve_rows = [row for row in aggregates if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
@@ -81,7 +88,7 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                     values,
                     [row["condition_id"] for row in curve_rows if row["curve_id"] == "baseline"],
                     [row["condition_id"] for row in curve_rows if row["curve_id"] == curve_id],
-                    quality, diversity, targets, config["analysis"],
+                    quality, diversity, targets, frozen_analysis,
                 )
                 point_improvements = []
                 for target, uncertainty in zip(targets, uncertainties):
@@ -103,7 +110,7 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                                    "delta_quality": values[(block, condition)][quality] - values[(block, reference)][quality], "delta_diversity": values[(block, condition)][diversity] - values[(block, reference)][diversity]})
                 if common:
                     diffs = np.array([values[(b, condition)][quality] - values[(b, reference)][quality] for b in common])
-                    interval_rows.append({"condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity, **_bootstrap(diffs, config["analysis"])})
+                    interval_rows.append({"condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity, **_bootstrap(diffs, frozen_analysis)})
     tables_dir = analysis_dir / "tables"
     _write_csv(tables_dir / "all_curve_points.csv", aggregates)
     _write_csv(tables_dir / "paired_effects.csv", paired)
@@ -112,6 +119,16 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
     _write_csv(tables_dir / "matched_diversity_summary.csv", improvement_summary_rows)
     _write_csv(tables_dir / "bootstrap_results.csv", interval_rows)
     _plots(analysis_dir, aggregates, improvement_summary_rows, config)
+    run_manifest = read_json(run_dir / "run_manifest.json")
+    write_json(analysis_dir / "analysis_manifest.json", {
+        "source_run_config_hash": run_manifest.get("config_hash"),
+        "frozen_statistical_analysis": contract.config["analysis"],
+        "presentation_analysis": {
+            "primary_metric_pair": config["analysis"]["primary_metric_pair"],
+            "optional_detail_curves": config["analysis"].get("optional_detail_curves", []),
+            "two_panel_display": config["analysis"].get("two_panel_display"),
+        },
+    })
 
 
 def _condition_metadata(row: dict[str, Any]) -> dict[str, Any]:
