@@ -17,7 +17,6 @@ pc_specific_psd/calibration/
 outputs/
 cache/
 .cache/
-manifests/
 logs/
 *.pt
 *.pth
