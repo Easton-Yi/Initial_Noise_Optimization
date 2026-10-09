@@ -1,0 +1,54 @@
+# Supplementary model; SDXL-Turbo is primary.
+# 400 GenEval prompts x 1 seed group x 4 images x 20 conditions = 32,000 images.
+# A/B each: alpha [0.8, 0.9] x gamma [0.0125, 0.025, 0.05].
+# Official evaluation_metadata.jsonl: commit af4902f24d3ca90ebbb446dd9891a59e0f82725f.
+# Selection: proportional by tag; largest-remainder allocation (ties: ascending tag).
+# Within each tag, rank by SHA256(UTF-8("20261009|{zero_based_row}|{prompt}"));
+# take the allocated count, then restore original source order. Prompt text unchanged.
+# Counts: single_object=58, two_object=72, counting=58, colors=68,
+# position=72, color_attr=72. No fox/teapot development prompts added.
+# Seed group s000 contains FOUR different base draws (batch_seed+i, i=0..3).
+# batch_seed = 4100000 + 10 * original_zero_based_row; eta uses the existing derived_seed.
+# Design B requires pink normalization BEFORE mixing, followed by final normalization.
+# Construction v2 is the identifier accepted by formal-experiments at 8de2e1f.
+# One block per prompt: block resampling now corresponds to prompt resampling.
+# This config change does not fix the previously identified analysis CI/reference issues.
+experiment:
+  name: flux2_klein_geneval400_1group_b_prenorm
+  master_seed: 20261009
+  gallery_size: 4
+  normalization_profile: per_sample_per_channel_zero_mean_unit_std
+  noise_frequency_grid: divgen_integer_fft_bin_indices_v1
+  noise_construction_version: exact_white_endpoints_profiled_normalization_v2
+  latent_injection_verification: prepare_latents_capture_v1
+paths:
+  outputs_root: outputs
+model:
+  adapter: flux2_klein
+  checkpoint: black-forest-labs/FLUX.2-klein-4B
+  revision: null
+  dtype: bfloat16
+  device: cuda
+  cpu_offload: false
+  cache_dir: cache
+generation:
+  height: 1024
+  width: 1024
+  num_inference_steps: 4
+  guidance_scale: 1.0
+  generation_batch_size: 1
+  release_model_after_generation: true
+  output_format: png
+blocks: {manifest: manifests/blocks_geneval400_1group.jsonl}
+baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+same_phase_floor: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05]}
+independent_white: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05]}
+quality_metrics:
+  clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
+  hpsv3: {enabled: true, checkpoint: official_default}
+  maniqa: {enabled: false}
+diversity_metrics:
+  dreamsim: {enabled: true, checkpoint: official_default, aggregation: mean_unordered_pair_distance}
+  lpips: {enabled: true, backbone: alex, aggregation: mean_unordered_pair_distance}
+  vendi_clip: {enabled: true, embedding_checkpoint: openai/clip-vit-large-patch14}
+analysis: {bootstrap_replicates: 2000, bootstrap_seed: 20261009, confidence_level: 0.95, compare_on_pareto_frontier: true, prohibit_extrapolation: true, primary_metric_pair: {quality: hpsv3, diversity: dreamsim_mean_pair_distance}, optional_detail_curves: []}

@@ -1,10 +1,20 @@
-# 30 prompts x 3 seed groups x 4 images x 48 conditions = 17,280 images.
-# Requires the formal-experiments implementation that normalizes pink before mixing in Design B.
-# v2 below matches the current runner; upgrade runner/config versions together before formal archival.
-# Existing analysis is block-bootstrap; prompt-cluster bootstrap requires an analysis-code update.
-# p000-p001 are previously explored prompts; p002-p029 are the new evaluation subset.
+# Primary model.
+# 400 GenEval prompts x 1 seed group x 4 images x 20 conditions = 32,000 images.
+# A/B each: alpha [0.8, 0.9] x gamma [0.0125, 0.025, 0.05].
+# Official evaluation_metadata.jsonl: commit af4902f24d3ca90ebbb446dd9891a59e0f82725f.
+# Selection: proportional by tag; largest-remainder allocation (ties: ascending tag).
+# Within each tag, rank by SHA256(UTF-8("20261009|{zero_based_row}|{prompt}"));
+# take the allocated count, then restore original source order. Prompt text unchanged.
+# Counts: single_object=58, two_object=72, counting=58, colors=68,
+# position=72, color_attr=72. No fox/teapot development prompts added.
+# Seed group s000 contains FOUR different base draws (batch_seed+i, i=0..3).
+# batch_seed = 4100000 + 10 * original_zero_based_row; eta uses the existing derived_seed.
+# Design B requires pink normalization BEFORE mixing, followed by final normalization.
+# Construction v2 is the identifier accepted by formal-experiments at 8de2e1f.
+# One block per prompt: block resampling now corresponds to prompt resampling.
+# This config change does not fix the previously identified analysis CI/reference issues.
 experiment:
-  name: sdxl_turbo_formal_30p_3groups_b_prenorm
+  name: sdxl_turbo_geneval400_1group_b_prenorm
   master_seed: 20261009
   gallery_size: 4
   normalization_profile: per_sample_per_channel_zero_mean_unit_std
@@ -30,10 +40,10 @@ generation:
   generation_batch_size: 1
   release_model_after_generation: true
   output_format: png
-blocks: {manifest: manifests/blocks_formal_30p_3groups.jsonl}
+blocks: {manifest: manifests/blocks_geneval400_1group.jsonl}
 baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
-same_phase_floor: {enabled: true, alpha_values: [0.6, 0.7, 0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05, 0.075, 0.1]}
-independent_white: {enabled: true, alpha_values: [0.6, 0.7, 0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05, 0.075, 0.1]}
+same_phase_floor: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05]}
+independent_white: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.0125, 0.025, 0.05]}
 quality_metrics:
   clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
   hpsv3: {enabled: true, checkpoint: official_default}
