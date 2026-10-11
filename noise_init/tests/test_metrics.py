@@ -8,7 +8,7 @@ from metric_runner import _group_quality_rows
 
 class MetricContractTests(unittest.TestCase):
     def test_four_images_group_to_one_quality_record(self):
-        records = [{"block_id": "b", "condition_id": "c", "metric": "clip_cosine", "score": n, "metric_config_hash": "x", "method": "white"} for n in range(4)]
+        records = [{"block_id": "b", "condition_id": "c", "base_index": n, "metric": "clip_cosine", "score": n, "metric_config_hash": "x", "method": "white"} for n in range(4)]
         grouped = _group_quality_rows(records)
         self.assertEqual(len(grouped), 1)
         self.assertEqual(grouped[0]["n"], 4)

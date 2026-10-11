@@ -97,26 +97,43 @@ def same_phase_floor(base_white: torch.Tensor, alpha: float, gamma: float) -> to
     return torch.fft.irfft2(torch.fft.rfft2(base_white, dim=(-2, -1)) * multiplier, s=base_white.shape[-2:], dim=(-2, -1))
 
 
-def independent_white(base_white: torch.Tensor, eta: torch.Tensor, alpha: float, gamma: float) -> torch.Tensor:
+def independent_white(
+    base_white: torch.Tensor,
+    eta: torch.Tensor,
+    alpha: float,
+    gamma: float,
+    normalization_profile: str,
+) -> torch.Tensor:
+    """Normalize pink before mixing; final normalization is applied by construct_noise."""
     _validate_gamma(gamma)
     if base_white.shape != eta.shape:
         raise ValueError("epsilon and eta must have the same shape")
+    # Preserve the exact baseline endpoint after construct_noise normalizes it.
     if gamma == 0.0:
         return pink(base_white, alpha)
     if gamma == 1.0:
         return eta.clone()
-    return (1.0 - gamma) ** 0.5 * pink(base_white, alpha) + gamma ** 0.5 * eta
+    pink_normalized = normalize(pink(base_white, alpha), normalization_profile)
+    return (1.0 - gamma) ** 0.5 * pink_normalized + gamma ** 0.5 * eta
+
+
+def construct_raw_noise(batch: NoiseBatch, method: str, alpha: float, gamma: float | None,
+                        normalization_profile: str) -> torch.Tensor:
+    """Construct a condition immediately before its shared final normalization."""
+    if method == "baseline":
+        return pink(batch.base_white, alpha)
+    elif method == "same_phase":
+        return same_phase_floor(batch.base_white, alpha, _require_gamma(gamma))
+    elif method == "independent_white":
+        return independent_white(batch.base_white, batch.independent_eta, alpha, _require_gamma(gamma),
+                                 normalization_profile)
+    raise ValueError(f"Unknown noise method: {method}")
 
 
 def construct_noise(batch: NoiseBatch, method: str, alpha: float, gamma: float | None, normalization_profile: str) -> torch.Tensor:
-    if method == "baseline":
-        raw = pink(batch.base_white, alpha)
-    elif method == "same_phase":
-        raw = same_phase_floor(batch.base_white, alpha, _require_gamma(gamma))
-    elif method == "independent_white":
-        raw = independent_white(batch.base_white, batch.independent_eta, alpha, _require_gamma(gamma))
-    else:
-        raise ValueError(f"Unknown noise method: {method}")
+    raw = construct_raw_noise(batch, method, alpha, gamma, normalization_profile)
+    # All methods receive the same final normalization. Design B additionally
+    # normalizes its pink component before mixing.
     return normalize(raw, normalization_profile)
 
 

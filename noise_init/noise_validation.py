@@ -20,7 +20,8 @@ import numpy as np
 import torch
 
 from io_utils import condition_id, read_json, read_jsonl, tensor_hash
-from noise_methods import NoiseBatch, construct_noise, noise_statistics, normalize, pink, radial_frequency_grid
+from noise_methods import (NoiseBatch, construct_raw_noise, noise_statistics, normalize, pink,
+                           radial_frequency_grid)
 
 ALPHAS = [round(0.1 * i, 1) for i in range(8)]
 GAMMAS = [round(0.1 * i, 1) for i in range(1, 10)]
@@ -255,13 +256,16 @@ def theoretical_shell_curve(family: str, alpha: float, gamma: float, r: torch.Te
 
 
 def independent_white_theoretical_shell(acc: "Accumulator", gamma: float) -> torch.Tensor:
-    """(1-gamma)*E[pink power] + gamma*E[eta power], from the actual raw pink/eta components ``construct_noise``
-    mixed for this condition's block(s) -- not assumed from the closed form. ``noise_methods.independent_white``
-    never normalizes pink/eta before mixing, so this is expected to (and empirically does) match the closed-form
-    ``(1-gamma)*H^2+gamma``, but deriving it from the real components makes that agreement a checked fact rather
-    than an assumption baked into the validator itself."""
+    """Expected pre-final-normalization PSD from the actual Design B components.
+
+    The pink component has already received the configured per-sample normalization,
+    while eta remains the cached unit-Gaussian draw. Consequently this is deliberately
+    derived from the observed component spectra rather than the old closed form
+    ``(1-gamma)*H^2+gamma``.
+    """
     n = max(acc.sample_count, 1)
-    return (1.0 - gamma) * (acc.raw_pink_shell_power_sum / n) + gamma * (acc.raw_eta_shell_power_sum / n)
+    return ((1.0 - gamma) * (acc.pink_component_shell_power_sum / n)
+            + gamma * (acc.eta_component_shell_power_sum / n))
 
 
 def normalize_log_curve(shell_mean: torch.Tensor) -> torch.Tensor:
@@ -300,8 +304,8 @@ def cosine_similarity(z: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 def same_phase_exact_ratio_error(raw: torch.Tensor, base_white: torch.Tensor, alpha: float, gamma: float, r: torch.Tensor) -> float:
     """Same-phase preserves Fourier phase, so |z_hat|^2/|eps_hat|^2 must equal G(r)^2 pointwise -- an exact,
     per-sample check that needs no ensemble averaging (unlike independent-white's random cross term). Takes the
-    actual reconstructed ``raw`` from ``construct_noise`` (not a locally recomputed ``same_phase_floor``) so this
-    check also catches a wrong family/gamma/normalization dispatch inside ``construct_noise`` itself."""
+    actual reconstructed ``raw`` from ``construct_raw_noise`` (not a locally recomputed ``same_phase_floor``) so
+    this check also catches a wrong family/gamma/normalization dispatch inside the shared constructor."""
     eps_hat = torch.fft.rfft2(base_white, dim=(-2, -1))
     z_hat = torch.fft.rfft2(raw, dim=(-2, -1))
     mask = eps_hat.abs() > 1e-4
@@ -321,8 +325,8 @@ def same_phase_exact_ratio_error(raw: torch.Tensor, base_white: torch.Tensor, al
 class Accumulator:
     shell_power_sum: torch.Tensor
     raw_shell_power_sum: torch.Tensor
-    raw_pink_shell_power_sum: torch.Tensor
-    raw_eta_shell_power_sum: torch.Tensor
+    pink_component_shell_power_sum: torch.Tensor
+    eta_component_shell_power_sum: torch.Tensor
     sample_count: int = 0
     mean_sum: float = 0.0
     std_sum: float = 0.0
@@ -346,8 +350,8 @@ class Accumulator:
 def new_accumulator(num_bins: int, height: int, width_freq: int) -> Accumulator:
     return Accumulator(shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
                         raw_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        raw_pink_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        raw_eta_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
+                        pink_component_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
+                        eta_component_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
                         cross_sum=torch.zeros(height, width_freq, dtype=torch.complex128),
                         sxx_sum=torch.zeros(height, width_freq, dtype=torch.float64),
                         syy_sum=torch.zeros(height, width_freq, dtype=torch.float64))
@@ -390,14 +394,11 @@ def accumulate_raw_shell_power(acc: Accumulator, raw: torch.Tensor, bin_index_fl
 
 def accumulate_raw_component_shell_power(acc: Accumulator, pink_component: torch.Tensor, eta: torch.Tensor,
                                           bin_index_flat: torch.Tensor, counts: torch.Tensor, num_bins: int) -> None:
-    """For independent-white only: tracks the raw pink and eta components' own PSDs, so the theoretical curve can
-    be built from what ``construct_noise`` actually mixed (``noise_methods.independent_white`` never normalizes
-    pink/eta before mixing, so this is expected to match the closed-form ``(1-gamma)*H^2+gamma`` formula, but
-    deriving it from the real components makes that agreement a checked fact rather than an assumption)."""
+    """Track the normalized-pink and raw-eta component PSDs actually mixed by Design B."""
     pink_power = torch.fft.rfft2(pink_component, dim=(-2, -1)).abs().square()
     eta_power = torch.fft.rfft2(eta, dim=(-2, -1)).abs().square()
-    acc.raw_pink_shell_power_sum += radial_shell_mean(pink_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
-    acc.raw_eta_shell_power_sum += radial_shell_mean(eta_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
+    acc.pink_component_shell_power_sum += radial_shell_mean(pink_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
+    acc.eta_component_shell_power_sum += radial_shell_mean(eta_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
 
 
 def summarize(acc: Accumulator) -> dict[str, float]:
@@ -458,17 +459,19 @@ def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str |
         base_reference = normalize(batch.base_white, profile)
         for condition in conditions:
             gamma = None if condition.family == "baseline" else condition.gamma
-            # ``raw`` (pre-normalization) is used only to validate the intervention formula itself
+            # ``raw`` (pre-final-normalization) is used only to validate the intervention formula itself
             # (theoretical PSD / same-phase exactness); every statistic below analyzes ``final``, the
             # tensor actually fed to the model, since normalization is affine and materially changes
             # absolute-scale stats (mean/std/l2_norm) even though shape-based ratios are nearly invariant.
-            raw = construct_noise(batch, condition.family, condition.alpha, gamma, "none")
+            raw = construct_raw_noise(batch, condition.family, condition.alpha, gamma, profile)
             final = normalize(raw, profile)
             acc = accumulators[condition]
             accumulate_block(acc, block_id, final, base_reference, r, bin_index_flat, counts, NUM_RADIAL_BINS, column_weights)
             accumulate_raw_shell_power(acc, raw, bin_index_flat, counts, NUM_RADIAL_BINS)
             if condition.family == "independent_white":
-                accumulate_raw_component_shell_power(acc, pink(batch.base_white, condition.alpha), batch.independent_eta,
+                pink_component = (pink(batch.base_white, condition.alpha) if gamma == 0.0
+                                  else normalize(pink(batch.base_white, condition.alpha), profile))
+                accumulate_raw_component_shell_power(acc, pink_component, batch.independent_eta,
                                                       bin_index_flat, counts, NUM_RADIAL_BINS)
 
             hash_matched = hash_checked = 0
@@ -558,7 +561,7 @@ def _aggregate_conditions(conditions: list[ConditionSpec], accumulators: dict[Co
         # equivalent_alpha compares like-for-like: the actual model-input (final) PSD shape against the
         # final-based baseline sweep above.
         empirical_curve = normalize_log_curve(acc.shell_power_sum / max(acc.sample_count, 1))
-        # psd_log_error validates the intervention *formula*, so both sides must stay pre-normalization: the
+        # psd_log_error validates the intervention *formula*, so both sides must stay pre-final-normalization: the
         # raw empirical PSD against the raw theoretical prediction (closed-form, or -- for independent-white --
         # derived from the real pink/eta components).
         raw_empirical_curve = normalize_log_curve(acc.raw_shell_power_sum / max(acc.sample_count, 1))
@@ -698,7 +701,7 @@ def _plot_theoretical_vs_empirical(target: Path, conditions: list[ConditionSpec]
                  title="Same-phase" if family == "same_phase" else "Independent-white")
         axis.grid(alpha=0.2)
         axis.legend(fontsize=6, ncol=2, frameon=False)
-    figure.suptitle(f"Theoretical vs empirical PSD shape, pre-normalization ({run_id}); "
+    figure.suptitle(f"Theoretical vs empirical PSD shape, pre-final-normalization ({run_id}); "
                      f"color=α, linestyle=γ, solid full-weight=empirical, faded thin=theory")
     _save_figure(figure, target)
 

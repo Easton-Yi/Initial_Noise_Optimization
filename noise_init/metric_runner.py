@@ -13,7 +13,9 @@ import numpy as np
 import torch
 from PIL import Image
 
-from io_utils import file_hash, read_jsonl, sha256_text, write_json
+from io_utils import file_hash, sha256_text, write_json
+from result_integrity import (METRIC_CACHE_VERSION, enabled_metric_names,
+                              validate_generation_records)
 
 
 def _package_version(name: str) -> str:
@@ -121,21 +123,45 @@ class MetricRunner:
 
 def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = False) -> None:
     run_dir = Path(run_dir)
-    rows = [row for path in run_dir.glob("generations/**/*.jsonl") for row in read_jsonl(path)]
-    rows = [row for row in rows if Path(row["image_path"]).name.startswith("image_")]
-    if not rows:
-        raise RuntimeError("No generated sample records found")
+    # This intentionally validates only galleries that already exist. Metrics
+    # can checkpoint a partial run, while formal analysis enforces the full
+    # frozen blocks x conditions product.
+    _, rows, groups = validate_generation_records(run_dir, require_complete=False)
     runner = MetricRunner(config, torch.device(config["model"]["device"]))
-    metric_hash = sha256_text(config.get("quality_metrics"), config.get("diversity_metrics"), runner.metric_versions())
+    versions = runner.metric_versions()
+    metric_hash = sha256_text(METRIC_CACHE_VERSION, config.get("quality_metrics"),
+                              config.get("diversity_metrics"), versions)
     metrics_dir = run_dir / "metrics"
     existing = [] if force else _read_csv(metrics_dir / "per_image.csv")
+    quality_metrics, _, _ = enabled_metric_names(config)
+
+    # Hash each distinct PNG once even when exact aliases create several
+    # logical experiment rows for it.
+    image_hashes = {path: file_hash(path) for path in {str(row["image_path"]) for row in rows}}
+    current_inputs: dict[tuple[str, str, int], tuple[str, str]] = {}
+    for row in rows:
+        logical = (str(row["block_id"]), str(row["condition_id"]), int(row["base_index"]))
+        current_inputs[logical] = (image_hashes[str(row["image_path"])], sha256_text(row["prompt"]))
+
+    per_image: list[dict[str, Any]] = []
+    for record in existing:
+        try:
+            logical = (str(record["block_id"]), str(record["condition_id"]), int(record["base_index"]))
+            digest, prompt_hash = current_inputs[logical]
+            if (record.get("metric") in quality_metrics and record.get("image_hash") == digest and
+                    record.get("prompt_hash") == prompt_hash and
+                    record.get("metric_config_hash") == metric_hash):
+                per_image.append(record)
+        except (KeyError, TypeError, ValueError):
+            continue
     # A score cache is keyed by immutable metric input, while the persisted
     # record is keyed by its experimental condition. Exact image aliases must
     # therefore reuse the score *and* receive their own condition record.
-    score_cache = {(r["image_hash"], r["metric_config_hash"], r["metric"]): float(r["score"]) for r in existing}
-    current_input = {(row["block_id"], row["condition_id"], row["base_index"]) for row in rows}
-    per_image: list[dict[str, Any]] = [r for r in existing if (r["block_id"], r["condition_id"], int(r.get("base_index", -1))) in current_input and r.get("metric_config_hash") == metric_hash]
-    existing_records = {(r["block_id"], r["condition_id"], int(r.get("base_index", -1)), r["image_hash"], r["metric_config_hash"], r["metric"]) for r in per_image}
+    score_cache = {(r["image_hash"], r["prompt_hash"], r["metric_config_hash"], r["metric"]): float(r["score"])
+                   for r in per_image}
+    existing_records = {(str(r["block_id"]), str(r["condition_id"]), int(r["base_index"]),
+                         r["image_hash"], r["prompt_hash"], r["metric_config_hash"], r["metric"])
+                        for r in per_image}
     # Run one quality model over the complete dataset, release it, and only
     # then load the next model. HPSv3 and CLIP do not fit concurrently on a
     # 24 GB GPU.
@@ -145,37 +171,41 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
             continue
         checkpoint_counter = 0
         for row in rows:
-            path, digest = Path(row["image_path"]), file_hash(row["image_path"])
-            record_key = (row["block_id"], row["condition_id"], row["base_index"], digest, metric_hash, metric)
+            path = Path(row["image_path"])
+            digest = image_hashes[str(row["image_path"])]
+            prompt_hash = sha256_text(row["prompt"])
+            record_key = (str(row["block_id"]), str(row["condition_id"]), int(row["base_index"]),
+                          digest, prompt_hash, metric_hash, metric)
             if record_key in existing_records:
                 continue
-            cache_key = (digest, metric_hash, metric)
+            cache_key = (digest, prompt_hash, metric_hash, metric)
             score = score_cache.get(cache_key)
             if score is None:
                 score = runner.clip_cosine(path, row["prompt"]) if metric == "clip_cosine" else runner.hpsv3(path, row["prompt"])
                 score_cache[cache_key] = score
-            per_image.append({**_common(row), "metric": metric, "score": score, "image_hash": digest, "metric_config_hash": metric_hash})
+            if not np.isfinite(score):
+                raise RuntimeError(f"Non-finite {metric} score for {row['block_id']}/{row['condition_id']}/{row['base_index']}")
+            per_image.append({**_common(row), "metric": metric, "score": score, "image_hash": digest,
+                              "prompt_hash": prompt_hash, "metric_config_hash": metric_hash})
             existing_records.add(record_key)
             checkpoint_counter += 1
             if checkpoint_counter % 100 == 0:
                 _write_csv(metrics_dir / "per_image.csv", per_image)
         _write_csv(metrics_dir / "per_image.csv", per_image)
         runner.release_models()
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        groups.setdefault((row["block_id"], row["condition_id"]), []).append(row)
     pairs, per_group = [], _group_quality_rows(per_image)
     # Likewise, evaluate each pairwise diversity model in its own phase.
     for metric, enabled, fn in (("dreamsim_mean_pair_distance", config["diversity_metrics"]["dreamsim"]["enabled"], runner.dreamsim_distance),
                                 ("lpips_alex_mean_pair_distance", config["diversity_metrics"]["lpips"]["enabled"], runner.lpips_distance)):
         if enabled:
             for (block_id, condition), gallery in groups.items():
-                if len(gallery) != 4:
-                    continue
                 gallery.sort(key=lambda value: value["base_index"])
                 values = []
                 for left, right in combinations(gallery, 2):
                     value = fn(Path(left["image_path"]), Path(right["image_path"]))
+                    if not np.isfinite(value):
+                        raise RuntimeError(f"Non-finite {metric} score for {block_id}/{condition}/"
+                                           f"{left['base_index']}-{right['base_index']}")
                     values.append(value)
                     pairs.append({**_common(left), "metric": metric, "left_base_index": left["base_index"], "right_base_index": right["base_index"], "score": value, "metric_config_hash": metric_hash})
                 per_group.append({**_common(gallery[0]), "metric": metric, "score": float(np.mean(values)), "n": 6, "metric_config_hash": metric_hash})
@@ -185,8 +215,6 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
 
     if config["diversity_metrics"]["vendi_clip"]["enabled"]:
         for (block_id, condition), gallery in groups.items():
-            if len(gallery) != 4:
-                continue
             gallery.sort(key=lambda value: value["base_index"])
             vectors = np.stack([runner.clip_embedding(Path(item["image_path"])) for item in gallery])
             kernel = vectors @ vectors.T
@@ -198,13 +226,17 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
             except ImportError as error:
                 raise ImportError("vendi-score is required for vendi_clip") from error
             value = float(vendi.score_K(kernel))
+            if not np.isfinite(value):
+                raise RuntimeError(f"Non-finite vendi_clip score for {block_id}/{condition}")
             per_group.append({**_common(gallery[0]), "metric": "vendi_clip", "score": value, "n": 4, "metric_config_hash": metric_hash})
         _write_csv(metrics_dir / "per_group.csv", per_group)
         runner.release_models()
     _write_csv(metrics_dir / "per_image.csv", per_image)
     _write_csv(metrics_dir / "per_pair.csv", pairs)
     _write_csv(metrics_dir / "per_group.csv", per_group)
-    write_json(metrics_dir / "metric_manifest.json", {"metric_config_hash": metric_hash, "versions": runner.metric_versions()})
+    write_json(metrics_dir / "metric_manifest.json", {"complete": True,
+               "metric_cache_version": METRIC_CACHE_VERSION,
+               "metric_config_hash": metric_hash, "versions": versions})
 
 
 def _common(row: dict[str, Any]) -> dict[str, Any]:
@@ -215,8 +247,18 @@ def _group_quality_rows(per_image: list[dict[str, Any]]) -> list[dict[str, Any]]
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in per_image:
         groups.setdefault((row["block_id"], row["condition_id"], row["metric"]), []).append(row)
-    return [{**_common(values[0]), "metric": metric, "score": float(np.mean([float(v["score"]) for v in values])), "n": len(values), "std": float(np.std([float(v["score"]) for v in values], ddof=0)), "minimum": float(np.min([float(v["score"]) for v in values])), "maximum": float(np.max([float(v["score"]) for v in values])), "metric_config_hash": values[0]["metric_config_hash"]}
-            for (_, _, metric), values in groups.items()]
+    result = []
+    for (block_id, condition, metric), values in groups.items():
+        indices = [int(value["base_index"]) for value in values]
+        if len(values) != 4 or set(indices) != {0, 1, 2, 3} or len(set(indices)) != len(indices):
+            raise RuntimeError(f"Incomplete quality scores for {block_id}/{condition}/{metric}: indices={indices}")
+        scores = [float(value["score"]) for value in values]
+        if not np.all(np.isfinite(scores)):
+            raise RuntimeError(f"Non-finite quality scores for {block_id}/{condition}/{metric}")
+        result.append({**_common(values[0]), "metric": metric, "score": float(np.mean(scores)), "n": 4,
+                       "std": float(np.std(scores, ddof=0)), "minimum": float(np.min(scores)),
+                       "maximum": float(np.max(scores)), "metric_config_hash": values[0]["metric_config_hash"]})
+    return result
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:

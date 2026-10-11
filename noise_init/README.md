@@ -2,13 +2,13 @@
 
 This directory is a standalone implementation of the experiment in `docs/INITIAL_NOISE_QD_EXPERIMENT_SPEC.md`; it does not import code, models, or configuration from another checkout.
 
-The implementation was informed by the 2D `rfft2` pink-noise convention and verified FLUX.2 latent-packing behavior in the prior DivGen work, but implements these locally. It adds immutable block/noise provenance, matched white-floor methods, standalone evaluation, and block-level Q–D analysis. Model weights are cached locally in `noise_init/cache/` by default.
+The implementation was informed by the 2D `rfft2` pink-noise convention and verified FLUX.2 latent-packing behavior in the prior DivGen work, but implements these locally. It adds immutable block/noise provenance, two white-floor methods, standalone evaluation, and block-level Q–D analysis. Model weights are cached locally in `noise_init/cache/` by default.
 
-`alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default.
+`alpha` is the amplitude-spectrum exponent: pink expected PSD is proportional to `(1+r)^(-2 alpha)`. All final conditions use the configured common normalization profile by default. At intermediate gamma values, independent-white Design B additionally normalizes its pink component with that profile before mixing it with raw eta.
 
 The radial frequency grid uses DivGen-compatible integer FFT-bin coordinates (`fftfreq(H) * H`, `rfftfreq(W) * W`), not normalized cycles per pixel. Runs made with the earlier normalized-frequency implementation are invalid for this experiment; the grid version is recorded in every new run manifest and blocks metrics/analysis on mismatched prior runs.
 
-The formal normalization profile uses population standard deviation (`unbiased=False`) uniformly for every condition. `divgen_compat` is available only as a separately named compatibility profile, using DivGen/Notebook sample standard deviation (`unbiased=True`); never mix it with the formal profile on one curve. White endpoints bypass FFT/IFFT so `alpha=0` and same-phase `gamma=1` are exact saved-white references before shared normalization.
+The formal normalization profile uses population standard deviation (`unbiased=False`) for the shared final normalization and for Design B's additional pink-component normalization. `divgen_compat` is available only as a separately named compatibility profile, using DivGen/Notebook sample standard deviation (`unbiased=True`); never mix it with the formal profile on one curve. White endpoints bypass FFT/IFFT so `alpha=0` and same-phase `gamma=1` are exact saved-white references before shared normalization.
 
 ## Setup
 
@@ -105,6 +105,8 @@ python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage generat
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage metrics --run-id flux2_full 2>&1 | tee logs/flux2_full_metrics.log
 python3 run_experiment.py --config configs/flux2_klein_full.yaml --stage analyze --run-id flux2_full --plot-alpha-range 0.3:0.7 --plot-gamma-range 0.1:0.6 2>&1 | tee logs/flux2_full_analyze.log
 ```
+
+The metrics stage may checkpoint any galleries that have already completed, but every gallery it sees must contain exactly four valid logical samples. Formal analysis is stricter: it requires the complete frozen `blocks.jsonl` × condition grid and complete enabled-metric tables before replacing tables or plots. The prompt-aware metric cache version causes legacy CLIP/HPSv3 scores to be recomputed on the first metrics run after this change; generated images do not need to be regenerated.
 
 For **each quality–diversity metric pair**, this produces 19 primary Q–D curves: one baseline plus one fixed-gamma alpha-sweep curve for every `(method, gamma)` pair. All curve points, frontiers, matched-diversity values, and bootstrap results are retained in machine-readable tables. Default figures are deliberately compact: HPSv3 × DreamSim is the pre-registered primary pair, while the other pairs are robustness checks. `gamma=0` is represented by the shared baseline curve. At `gamma=1`, same-phase is exactly the baseline's cached base-white `epsilon` point, while independent-white is its cached independent `eta` point: it belongs to the same white-noise distribution but finite-sample metrics need not equal the baseline white point. Both are endpoint tensor tests only. The alpha-zero same-phase point is recorded as an exact alias of the cached baseline-white gallery, so each block needs 143 unique galleries rather than 152 duplicate galleries.
 
