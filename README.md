@@ -42,6 +42,8 @@ $\hat z_{\alpha,\gamma}(u,v) = \hat z(u,v)\sqrt{(1-\gamma)H_\alpha(u,v)^2+\gamma
 
 $z_{\alpha,\gamma}=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_{\alpha,\gamma}(u,v))\big)$
 
+> For Design A, $\gamma=0$ recovers the corresponding pink-noise condition, while $\gamma=1$ recovers the original white-noise sample $z$.
+
 ##
 #### Design B: Independent-white replenishment
 
@@ -49,9 +51,13 @@ $\hat z_\alpha(u,v) = \hat z(u,v)\cdot\frac{1}{(1+f_{u,v})^\alpha} \qquad f_{u,v
 
 $z_\alpha=\mathrm{normalise}\big(\mathrm{FFT2D}^{-1}(\hat z_\alpha(u,v))\big)$
 
-$`z'_{\alpha} = \sqrt{1-\gamma}\,z_{\alpha} + \sqrt{\gamma}\,\eta,\qquad \eta\sim\mathcal{N}(0,I),\quad \eta\perp z`$
+$z'_\alpha = \mathrm{normalise}\big(\sqrt{1-\gamma}\,z_\alpha + \sqrt{\gamma}\,\eta\big),\qquad \eta\sim\mathcal{N}(0,I),\quad \eta\perp z$
 
-//The mixed-in noise is independently sampled white noise η, not same z.
+//First normalise the pink noise to give it a consistent scale before mixing; then normalise the mixture to control the final total energy.
+
+//The mixed-in noise is independently sampled white noise η, not the same z.
+
+> For Design B, $\gamma=0$ recovers the corresponding normalised pink-noise condition (up to numerical precision), while $\gamma=1$ gives $\mathrm{normalise}(\eta)$, which has the same distribution as $\mathrm{normalise}(z)$ but is not the same sample.
 
 ##
 ## <u>3. Process:</u>
