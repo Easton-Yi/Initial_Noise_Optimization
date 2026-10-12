@@ -41,7 +41,7 @@ generation:
   output_format: png
 blocks: {manifest: manifests/blocks_geneval400_1group.jsonl}
 baseline: {enabled: true, alpha_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]}
-same_phase_floor: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.025, 0.0375, 0.05]}
+same_phase_floor: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.025, 0.038, 0.05]}
 independent_white: {enabled: true, alpha_values: [0.8, 0.9], gamma_values: [0.75, 0.825, 0.9]}
 quality_metrics:
   clip: {enabled: true, checkpoint: openai/clip-vit-large-patch14, output_name: clip_cosine}
