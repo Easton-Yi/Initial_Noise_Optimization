@@ -45,15 +45,27 @@ the post-hoc frequency validator before interpreting Q–D results:
 python3 noise_validation.py --run-id flux2_full
 ```
 
-`--alphas`/`--gammas` select which alpha/gamma values are drawn in
+`--alphas` and the gamma-selection flags choose which values are drawn in
 `radial_psd_selected.png` and `theoretical_vs_empirical_psd.png` only (every
-other output always covers the full fixed grid); each accepts an inclusive
-`MIN:MAX` range, a single value, or a comma-separated list, resolved against
-the fixed grids, e.g.:
+other output always covers each method's full configured grid). Each accepts
+an inclusive `MIN:MAX` range, a single value, or a comma-separated list,
+resolved against the frozen run grids. When both methods share gamma values,
+the backward-compatible `--gammas` flag can select them together, e.g.:
 
 ```bash
 python3 noise_validation.py --run-id flux2_full --alphas 0.3:0.7 --gammas 0.1,0.3,0.6,0.9
 ```
+
+For runs with different method-specific gamma grids, select them separately:
+
+```bash
+python3 noise_validation.py --run-id sdxl_turbo_full_finer --alphas 0.8,0.9 \
+  --same-phase-gammas 0.05 --independent-gammas 0.9
+```
+
+The validator reconstructs only the alpha/gamma combinations configured for
+each method in the frozen run manifest; it never forms the Cartesian product
+of the two methods' gamma grids.
 
 This reconstructs every configured noise condition from the saved cache without
 sampling replacement noise, loading the diffusion model, or modifying generated
