@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
-"""Standalone generation-quality comparison grid for one (prompt_id, alpha, gamma).
+"""Standalone generation-quality comparison grid for one prompt and alpha.
 
 Builds one PNG with two side-by-side galleries from an already-generated run:
 
   Left grid (6 rows, one seed batch): white, then pink alpha=0.1..0.5.
-  Right grid (6 rows, three seed batches): top 3 rows are "ours" same-phase at
-  the given alpha/gamma for seeds s000..s002; bottom 3 rows are independent-white
-  at the same alpha/gamma for the same three seeds.
+  Right grid:
+    * multi-seed runs: same-phase and independent-white at one gamma, with one
+      row per seed batch (the original layout).  If the two methods have
+      disjoint gamma grids, --gamma selects the same ordinal grid position;
+    * one-seed GenEval runs: one row per method-specific gamma, so the three
+      same-phase gamma values and three independent-white gamma values fill the
+      six rows.
 
 Each row reuses the 1x4 gallery PNG already written by run_experiment.py's
 generate stage, so this script never loads a model and never samples noise.
 
-run:
-python3 make_comparison_grid.py   --config configs/sdxl_turbo_full_finer.yaml   --run-id sdxl_turbo_full_finer   --prompt-id p001   --alpha 0.9 --gamma 0.05
+sdxl_turbo_full_finer example:
+python make_comparison_grid.py \
+  --config configs/sdxl_turbo_full_finer.yaml \
+  --run-id sdxl_turbo_full_finer \
+  --prompt-id p001 \
+  --alpha 0.9 \
+  --gamma 0.05
+
+GenEval400 example:
+python make_comparison_grid.py \
+  --config configs/sdxl_turbo_geneval400_1group.yaml \
+  --run-id sdxl_turbo_genEval400 \
+  --prompt-id geneval_0000 \
+  --alpha 0.9
+
+The GenEval gamma lists default to the method-specific grids frozen in the run
+manifest.  They can be overridden with --same-phase-gammas and
+--independent-gammas.
 """
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import yaml
@@ -64,6 +85,56 @@ def load_config(path: Path) -> dict:
 def run_dir_for(config: dict, config_path: Path, run_id: str | None) -> Path:
     root = (config_path.parent.parent / config.get("paths", {}).get("outputs_root", "outputs")).resolve()
     return root / (run_id or config["experiment"]["name"])
+
+
+def frozen_run_config(run_dir: Path, fallback: dict) -> dict:
+    """Use the generated run's config so later YAML edits cannot change the grid."""
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return fallback
+    with manifest_path.open(encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    resolved = manifest.get("resolved_config")
+    return resolved if isinstance(resolved, dict) else fallback
+
+
+def configured_gammas(config: dict, section: str) -> list[float]:
+    values = config.get(section, {}).get("gamma_values", [])
+    if not values:
+        raise ValueError(f"No gamma_values configured under {section!r}")
+    return [float(value) for value in values]
+
+
+def _value_index(values: list[float], target: float) -> int | None:
+    return next((index for index, value in enumerate(values) if abs(value - target) < 1e-9), None)
+
+
+def resolve_seed_gammas(
+    gamma: float | None,
+    same_phase_gamma: float | None,
+    independent_gamma: float | None,
+    same_phase_grid: list[float],
+    independent_grid: list[float],
+) -> tuple[float | None, float | None]:
+    """Resolve method-specific values while keeping the original --gamma CLI useful."""
+    if same_phase_gamma is not None or independent_gamma is not None:
+        return (
+            same_phase_gamma if same_phase_gamma is not None else gamma,
+            independent_gamma if independent_gamma is not None else gamma,
+        )
+    if gamma is None:
+        return None, None
+
+    same_index = _value_index(same_phase_grid, gamma)
+    independent_index = _value_index(independent_grid, gamma)
+    if same_index is not None and independent_index is not None:
+        return gamma, gamma
+    if len(same_phase_grid) == len(independent_grid):
+        if same_index is not None:
+            return gamma, independent_grid[same_index]
+        if independent_index is not None:
+            return same_phase_grid[independent_index], gamma
+    return gamma, gamma
 
 
 def blocks_for_prompt(run_dir: Path, prompt_id: str) -> list[dict]:
@@ -151,12 +222,20 @@ def text_height(font: ImageFont.FreeTypeFont) -> int:
     return bbox[3] - bbox[1]
 
 
+def display_value(value: float) -> str:
+    return alpha_token(value).replace("p", ".")
+
+
 def build_grid(
     run_dir: Path,
     model_id: str,
     prompt_id: str,
     alpha: float,
-    gamma: float,
+    gamma: float | None,
+    same_phase_gamma: float | None,
+    independent_gamma: float | None,
+    same_phase_gammas: list[float],
+    independent_gammas: list[float],
     baseline_alphas: list[float],
     baseline_seed_batch: str | None,
     label_width: int,
@@ -181,25 +260,59 @@ def build_grid(
         left_rows.append(label_row(image, label, label_width=label_width, font=label_font))
     left_grid = stack_rows(left_rows, row_gap=row_gap)
 
-    # --- right grid: ours (same-phase / independent-white) across 3 seeds ---
+    # --- right grid: seed rows for development runs, gamma rows for GenEval ---
     right_rows = []
-    for family, tag in (("same_phase", "same-phase"), ("independent_white", "independent")):
-        for block in blocks:
-            image = load_row(row_image_path(run_dir, model_id, block["block_id"], family, alpha, gamma))
-            right_rows.append(
-                label_row(
-                    image,
-                    tag,
-                    label_width=label_width,
-                    font=label_font,
-                    sub_label=f"seed={block['batch_seed']}",
-                    sub_font=seed_font,
+    if len(blocks) == 1:
+        for family, tag, gammas in (
+            ("same_phase", "same-phase", same_phase_gammas),
+            ("independent_white", "independent", independent_gammas),
+        ):
+            for method_gamma in gammas:
+                image = load_row(
+                    row_image_path(run_dir, model_id, baseline_block["block_id"], family, alpha, method_gamma)
                 )
+                right_rows.append(
+                    label_row(
+                        image,
+                        tag,
+                        label_width=label_width,
+                        font=label_font,
+                        sub_label=f"γ={display_value(method_gamma)}",
+                        sub_font=seed_font,
+                    )
+                )
+        separator_after = len(same_phase_gammas) - 1
+        right_header = f"ours at α={display_value(alpha)}: method-specific γ sweeps"
+    else:
+        if same_phase_gamma is None or independent_gamma is None:
+            raise ValueError(
+                "--gamma or both --same-phase-gamma/--independent-gamma are required "
+                "for a prompt with multiple seed batches"
             )
-    right_grid = stack_rows(right_rows, row_gap=row_gap, separator_after=len(blocks) - 1)
+        for family, tag, method_gamma in (
+            ("same_phase", "same-phase", same_phase_gamma),
+            ("independent_white", "independent", independent_gamma),
+        ):
+            for block in blocks:
+                image = load_row(row_image_path(run_dir, model_id, block["block_id"], family, alpha, method_gamma))
+                right_rows.append(
+                    label_row(
+                        image,
+                        tag,
+                        label_width=label_width,
+                        font=label_font,
+                        sub_label=f"seed={block['batch_seed']}",
+                        sub_font=seed_font,
+                    )
+                )
+        separator_after = len(blocks) - 1
+        right_header = (
+            f"ours at α={display_value(alpha)}: same-phase γ={display_value(same_phase_gamma)}, "
+            f"independent γ={display_value(independent_gamma)}"
+        )
+    right_grid = stack_rows(right_rows, row_gap=row_gap, separator_after=separator_after)
 
     left_header = "pure white and pink noise init"
-    right_header = f"ours: same phase vs. independent white(alpha={alpha}, gamma={gamma})"
 
     header_height = text_height(header_font) + 20
     grids_width = left_grid.width + column_gap + right_grid.width
@@ -267,7 +380,32 @@ def main() -> None:
     parser.add_argument("--run-id", help="Defaults to experiment.name in the config")
     parser.add_argument("--prompt-id", required=True, help="e.g. p000")
     parser.add_argument("--alpha", required=True, type=float, help="ours alpha (same_phase / independent_white)")
-    parser.add_argument("--gamma", required=True, type=float, help="ours gamma (same_phase / independent_white)")
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        help=(
+            "gamma selector for the original multi-seed layout; on disjoint equal-length method grids, "
+            "the corresponding ordinal value is used for the other method"
+        ),
+    )
+    parser.add_argument(
+        "--same-phase-gamma",
+        type=float,
+        help="explicit same-phase gamma for the original multi-seed layout",
+    )
+    parser.add_argument(
+        "--independent-gamma",
+        type=float,
+        help="explicit independent-white gamma for the original multi-seed layout",
+    )
+    parser.add_argument(
+        "--same-phase-gammas",
+        help="comma-separated gamma rows for a one-seed run (default: frozen same_phase_floor.gamma_values)",
+    )
+    parser.add_argument(
+        "--independent-gammas",
+        help="comma-separated gamma rows for a one-seed run (default: frozen independent_white.gamma_values)",
+    )
     parser.add_argument("--baseline-alphas", default="0.0,0.1,0.2,0.3,0.4,0.5", help="comma-separated baseline alpha sweep for the left grid")
     parser.add_argument("--baseline-seed-batch", help="seed_batch_id used for the left grid (default: first block for this prompt)")
     parser.add_argument("--label-width", type=int, default=360)
@@ -279,8 +417,26 @@ def main() -> None:
     config_path = Path(args.config).resolve()
     config = load_config(config_path)
     run_dir = run_dir_for(config, config_path, args.run_id)
-    model_id = config["model"]["adapter"]
+    run_config = frozen_run_config(run_dir, config)
+    model_id = run_config["model"]["adapter"]
     baseline_alphas = parse_float_list(args.baseline_alphas)
+    same_phase_gammas = (
+        parse_float_list(args.same_phase_gammas)
+        if args.same_phase_gammas
+        else configured_gammas(run_config, "same_phase_floor")
+    )
+    independent_gammas = (
+        parse_float_list(args.independent_gammas)
+        if args.independent_gammas
+        else configured_gammas(run_config, "independent_white")
+    )
+    same_phase_gamma, independent_gamma = resolve_seed_gammas(
+        args.gamma,
+        args.same_phase_gamma,
+        args.independent_gamma,
+        same_phase_gammas,
+        independent_gammas,
+    )
 
     grid = build_grid(
         run_dir=run_dir,
@@ -288,6 +444,10 @@ def main() -> None:
         prompt_id=args.prompt_id,
         alpha=args.alpha,
         gamma=args.gamma,
+        same_phase_gamma=same_phase_gamma,
+        independent_gamma=independent_gamma,
+        same_phase_gammas=same_phase_gammas,
+        independent_gammas=independent_gammas,
         baseline_alphas=baseline_alphas,
         baseline_seed_batch=args.baseline_seed_batch,
         label_width=args.label_width,
@@ -295,7 +455,17 @@ def main() -> None:
         column_gap=args.column_gap,
     )
 
-    output = Path(args.output) if args.output else run_dir / "analysis" / "generation_grids" / f"{args.prompt_id}_alpha{alpha_token(args.alpha)}_gamma{alpha_token(args.gamma)}.png"
+    if args.output:
+        output = Path(args.output)
+    elif len(blocks_for_prompt(run_dir, args.prompt_id)) == 1:
+        output = run_dir / "analysis" / "generation_grids" / f"{args.prompt_id}_alpha{alpha_token(args.alpha)}.png"
+    else:
+        output = (
+            run_dir
+            / "analysis"
+            / "generation_grids"
+            / f"{args.prompt_id}_alpha{alpha_token(args.alpha)}_gamma{alpha_token(args.gamma)}.png"
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     grid.save(output, format="PNG")
     print(f"wrote {output}")
