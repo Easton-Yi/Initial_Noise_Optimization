@@ -33,11 +33,11 @@ FAMILIES_CONFIG_KEYS = ("same_phase_floor", "independent_white")
 PRIMARY_ALPHA_MIN, PRIMARY_ALPHA_MAX = 0.3, 0.7
 PRIMARY_GAMMA_MAX = 0.6
 CONTROL_ALPHA_MAX = 0.2
-# Defaults used when --alphas/--gammas are not passed on the CLI.
+# Defaults used when plot-selection flags are not passed on the CLI.
 DEFAULT_SELECTED_ALPHAS = (0.0, 0.3, 0.5, 0.7)
 DEFAULT_SELECTED_GAMMAS = (0.1, 0.3, 0.6, 0.9)
 NUM_RADIAL_BINS = 24
-# Cycled by index (not looked up by value), so any --alphas/--gammas selection --
+# Cycled by index (not looked up by value), so any alpha/gamma selection --
 # a range, a single value, or an arbitrary discrete list -- gets a distinct style.
 LINESTYLE_CYCLE = ("solid", (0, (4, 1.5)), (0, (1, 1)), (0, (3, 1, 1, 1)), (0, (5, 1, 1, 1, 1, 1)), (0, (1, 1, 3, 1)))
 SAME_PHASE_EXACT_TOLERANCE = 1e-3
@@ -76,11 +76,19 @@ class ConditionSpec:
         return "primary"
 
 
-def full_condition_grid(baseline_alphas: list[float], proposed_alphas: list[float],
-                         proposed_gammas: list[float]) -> list[ConditionSpec]:
+def full_condition_grid(baseline_alphas: list[float], proposed_alphas: dict[str, list[float]],
+                         proposed_gammas: dict[str, list[float]]) -> list[ConditionSpec]:
+    """Expand only combinations configured for each family.
+
+    Some finer runs deliberately use disjoint gamma grids for same-phase and
+    independent-white. Keeping the grids keyed by family prevents validation
+    from inventing cross-family combinations that were never generated.
+    """
     conditions = [ConditionSpec("baseline", alpha, None) for alpha in baseline_alphas]
     for family in FAMILIES:
-        conditions += [ConditionSpec(family, alpha, gamma) for alpha in proposed_alphas for gamma in proposed_gammas]
+        conditions += [ConditionSpec(family, alpha, gamma)
+                       for alpha in proposed_alphas[family]
+                       for gamma in proposed_gammas[family]]
     return conditions
 
 
@@ -139,14 +147,20 @@ def normalization_profile_for(run_dir: Path) -> str:
     return _run_resolved_config(run_dir)["experiment"]["normalization_profile"]
 
 
-def load_condition_grids(run_dir: Path) -> tuple[list[float], list[float], list[float]]:
+def load_condition_grids(run_dir: Path) -> tuple[list[float], dict[str, list[float]], dict[str, list[float]]]:
     """Reads this run's actual alpha/gamma grids from its manifest instead of assuming the
     standard 0.1-step sweep -- a 'finer' config (see configs/sdxl_turbo_full_finer.yaml) can use
     an entirely different, non-uniform alpha/gamma grid for the proposed methods only."""
     config = _run_resolved_config(run_dir)
     baseline_alphas = sorted(round(v, 6) for v in config["baseline"]["alpha_values"])
-    proposed_alphas = sorted({round(v, 6) for family in FAMILIES_CONFIG_KEYS for v in config[family]["alpha_values"]})
-    proposed_gammas = sorted({round(v, 6) for family in FAMILIES_CONFIG_KEYS for v in config[family]["gamma_values"]})
+    proposed_alphas = {
+        family: sorted(round(v, 6) for v in config[config_key]["alpha_values"])
+        for family, config_key in zip(FAMILIES, FAMILIES_CONFIG_KEYS)
+    }
+    proposed_gammas = {
+        family: sorted(round(v, 6) for v in config[config_key]["gamma_values"])
+        for family, config_key in zip(FAMILIES, FAMILIES_CONFIG_KEYS)
+    }
     return baseline_alphas, proposed_alphas, proposed_gammas
 
 
@@ -157,6 +171,40 @@ def _defaults_or_full(preferred: tuple[float, ...], grid: list[float]) -> tuple[
     than a near-empty, effectively arbitrary selection."""
     filtered = tuple(v for v in preferred if v in grid)
     return filtered if len(filtered) >= 2 else tuple(sorted(grid))
+
+
+def _selected_gamma_grids(
+    gamma_spec: str | None,
+    same_phase_gamma_spec: str | None,
+    independent_gamma_spec: str | None,
+    grids: dict[str, list[float]],
+) -> dict[str, tuple[float, ...]]:
+    """Resolve plot selections without conflating method-specific gamma grids.
+
+    ``--gammas`` remains available for old runs whose methods share values, but
+    it is resolved against the intersection. Disjoint grids must use the two
+    explicit method flags.
+    """
+    if gamma_spec is not None and (same_phase_gamma_spec is not None or independent_gamma_spec is not None):
+        raise ValueError("--gammas cannot be combined with --same-phase-gammas or --independent-gammas")
+    if gamma_spec is not None:
+        common = sorted(set(grids["same_phase"]) & set(grids["independent_white"]))
+        if not common:
+            raise ValueError(
+                "--gammas cannot be used because the same-phase and independent-white gamma grids are disjoint; "
+                "use --same-phase-gammas and --independent-gammas"
+            )
+        selected = _parse_value_spec(gamma_spec, common, "gammas")
+        return {family: selected for family in FAMILIES}
+    specs = {
+        "same_phase": (same_phase_gamma_spec, "same-phase-gammas"),
+        "independent_white": (independent_gamma_spec, "independent-gammas"),
+    }
+    return {
+        family: (_parse_value_spec(spec, grids[family], flag_name)
+                 if spec is not None else _defaults_or_full(DEFAULT_SELECTED_GAMMAS, grids[family]))
+        for family, (spec, flag_name) in specs.items()
+    }
 
 
 def discover_blocks(run_dir: Path) -> list[str]:
@@ -417,7 +465,13 @@ def summarize(acc: Accumulator) -> dict[str, float]:
 # Main per-run validation
 # --------------------------------------------------------------------------- #
 
-def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str | None = None) -> dict[str, Any]:
+def run_validation(
+    run_id: str,
+    alpha_spec: str | None = None,
+    gamma_spec: str | None = None,
+    same_phase_gamma_spec: str | None = None,
+    independent_gamma_spec: str | None = None,
+) -> dict[str, Any]:
     run_dir = find_run_dir(run_id)
     profile = normalization_profile_for(run_dir)
     blocks = discover_blocks(run_dir)
@@ -425,10 +479,11 @@ def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str |
     baseline_alphas, proposed_alphas, proposed_gammas = load_condition_grids(run_dir)
     conditions = full_condition_grid(baseline_alphas, proposed_alphas, proposed_gammas)
 
-    alphas = (_parse_value_spec(alpha_spec, proposed_alphas, "alphas") if alpha_spec is not None
-              else _defaults_or_full(DEFAULT_SELECTED_ALPHAS, proposed_alphas))
-    gammas = (_parse_value_spec(gamma_spec, proposed_gammas, "gammas") if gamma_spec is not None
-              else _defaults_or_full(DEFAULT_SELECTED_GAMMAS, proposed_gammas))
+    all_proposed_alphas = sorted({alpha for grid in proposed_alphas.values() for alpha in grid})
+    alphas = (_parse_value_spec(alpha_spec, all_proposed_alphas, "alphas") if alpha_spec is not None
+              else _defaults_or_full(DEFAULT_SELECTED_ALPHAS, all_proposed_alphas))
+    selected_gammas = _selected_gamma_grids(
+        gamma_spec, same_phase_gamma_spec, independent_gamma_spec, proposed_gammas)
 
     batches: dict[str, NoiseBatch] = {}
     integrity_ok = True
@@ -530,12 +585,13 @@ def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str |
 
     r_max = float(r.max())
     curves = _condition_shell_curves(conditions, accumulators)
-    _plot_radial_psd_selected(out_dir / "radial_psd_selected.png", curves, run_id, r_max, alphas, gammas)
+    _plot_radial_psd_selected(out_dir / "radial_psd_selected.png", curves, run_id, r_max, alphas, selected_gammas)
     _plot_theoretical_vs_empirical(out_dir / "theoretical_vs_empirical_psd.png", conditions, accumulators, r,
-                                    bin_index_flat, counts, run_id, r_max, alphas, gammas)
+                                    bin_index_flat, counts, run_id, r_max, alphas, selected_gammas)
     _plot_equivalent_alpha_heatmap(out_dir / "equivalent_alpha_heatmap.png", equivalent_alpha_map, run_id,
-                                    list(alphas), list(gammas), baseline_alphas)
-    _plot_coherence_heatmap(out_dir / "coherence_heatmap.png", coherence_map, run_id, list(alphas), list(gammas))
+                                    proposed_alphas, proposed_gammas, baseline_alphas)
+    _plot_coherence_heatmap(out_dir / "coherence_heatmap.png", coherence_map, run_id,
+                             proposed_alphas, proposed_gammas)
 
     return {
         "run_id": run_id, "run_dir": run_dir, "num_blocks": len(blocks), "num_conditions": len(conditions),
@@ -630,7 +686,8 @@ def _save_figure(figure, target: Path) -> None:
 
 
 def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Tensor], run_id: str, r_max: float,
-                               alphas: tuple[float, ...], gammas: tuple[float, ...]) -> None:
+                               alphas: tuple[float, ...],
+                               gammas: dict[str, tuple[float, ...]]) -> None:
     import matplotlib.pyplot as plt
     conditions = list(curves)
     num_bins = len(next(iter(curves.values())))
@@ -638,6 +695,7 @@ def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Te
     cmap = plt.colormaps["viridis"]
     x = _shell_centers(num_bins, r_max)
     for axis, family in zip(axes, FAMILIES):
+        family_gammas = gammas[family]
         baseline_conditions = sorted([c for c in conditions if c.family == "baseline"], key=lambda c: c.alpha)
         for index, bc in enumerate(baseline_conditions):
             axis.plot(x, curves[bc].numpy(), color="0.75", linewidth=0.8, zorder=1,
@@ -649,7 +707,7 @@ def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Te
                           xytext=(4, 0), textcoords="offset points", va="center", fontsize=6.5, color="0.4",
                           annotation_clip=False)
         for alpha in alphas:
-            for gamma_index, gamma in enumerate(gammas):
+            for gamma_index, gamma in enumerate(family_gammas):
                 match = next((c for c in conditions if c.family == family and c.alpha == alpha and c.gamma == gamma), None)
                 if match is None:
                     continue
@@ -667,7 +725,8 @@ def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Te
 
 def _plot_theoretical_vs_empirical(target: Path, conditions: list[ConditionSpec], accumulators: dict[ConditionSpec, Accumulator],
                                     r: torch.Tensor, bin_index_flat: torch.Tensor, counts: torch.Tensor, run_id: str,
-                                    r_max: float, alphas: tuple[float, ...], gammas: tuple[float, ...]) -> None:
+                                    r_max: float, alphas: tuple[float, ...],
+                                    gammas: dict[str, tuple[float, ...]]) -> None:
     # Overlays every requested alpha x gamma pair in one figure per family: color encodes alpha,
     # linestyle (LINESTYLE_CYCLE) encodes gamma, and empirical vs theoretical is distinguished by
     # weight/opacity only (empirical = full weight, theoretical = thinner and faded) so linestyle
@@ -679,9 +738,10 @@ def _plot_theoretical_vs_empirical(target: Path, conditions: list[ConditionSpec]
     cmap = plt.colormaps["plasma"]
     x = _shell_centers(NUM_RADIAL_BINS, r_max)
     for axis, family in zip(axes, FAMILIES):
+        family_gammas = gammas[family]
         for alpha_index, alpha in enumerate(alphas):
             color = cmap(0.1 + 0.8 * alpha_index / max(len(alphas) - 1, 1))
-            for gamma_index, gamma in enumerate(gammas):
+            for gamma_index, gamma in enumerate(family_gammas):
                 match = next((c for c in conditions if c.family == family and c.alpha == alpha and c.gamma == gamma), None)
                 if match is None:
                     continue
@@ -736,26 +796,30 @@ def _heatmap_panel(axis, matrix: np.ndarray, title: str, cmap: str, vmin: float 
 
 
 def _plot_equivalent_alpha_heatmap(target: Path, mapping: dict[tuple[str, float, float], float], run_id: str,
-                                    alphas: list[float], gammas: list[float], baseline_alphas: list[float]) -> None:
+                                    alphas: dict[str, list[float]], gammas: dict[str, list[float]],
+                                    baseline_alphas: list[float]) -> None:
     import matplotlib.pyplot as plt
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
     for axis, family in zip(axes, FAMILIES):
-        matrix = _grid_matrix(mapping, family, alphas, gammas)
+        family_alphas, family_gammas = alphas[family], gammas[family]
+        matrix = _grid_matrix(mapping, family, family_alphas, family_gammas)
         image = _heatmap_panel(axis, matrix, "Same-phase" if family == "same_phase" else "Independent-white",
-                                "viridis", min(baseline_alphas), max(baseline_alphas), alphas, gammas)
+                                "viridis", min(baseline_alphas), max(baseline_alphas),
+                                family_alphas, family_gammas)
         figure.colorbar(image, ax=axis, label="equivalent baseline α", shrink=0.85)
     figure.suptitle(f"Equivalent baseline α by closest normalized log-PSD ({run_id}); white box = primary region")
     _save_figure(figure, target)
 
 
 def _plot_coherence_heatmap(target: Path, mapping: dict[tuple[str, float, float], float], run_id: str,
-                             alphas: list[float], gammas: list[float]) -> None:
+                             alphas: dict[str, list[float]], gammas: dict[str, list[float]]) -> None:
     import matplotlib.pyplot as plt
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
     for axis, family in zip(axes, FAMILIES):
-        matrix = _grid_matrix(mapping, family, alphas, gammas)
+        family_alphas, family_gammas = alphas[family], gammas[family]
+        matrix = _grid_matrix(mapping, family, family_alphas, family_gammas)
         image = _heatmap_panel(axis, matrix, "Same-phase" if family == "same_phase" else "Independent-white",
-                                "viridis", 0.0, 1.0, alphas, gammas)
+                                "viridis", 0.0, 1.0, family_alphas, family_gammas)
         figure.colorbar(image, ax=axis, label="Fourier coherence with base white", shrink=0.85)
     figure.suptitle(f"Coherence with base white noise ({run_id}); white box = primary region")
     _save_figure(figure, target)
@@ -774,12 +838,26 @@ def main() -> None:
                               "against this run's actual alpha grid (read from its run_manifest.json -- may differ "
                               f"per run, e.g. a finer sweep). Default: {DEFAULT_SELECTED_ALPHAS} where present.")
     parser.add_argument("--gammas", default=None,
-                         help="Gammas to show in the same two plots: a 'MIN:MAX' inclusive range, a single value, "
-                              "or a comma-separated list, resolved against this run's actual gamma grid. "
-                              f"Default: {DEFAULT_SELECTED_GAMMAS} where present.")
+                         help="Shared gamma selection for runs where both methods use the requested values. "
+                              "Cannot be combined with the method-specific gamma flags.")
+    parser.add_argument("--same-phase-gammas", default=None,
+                         help="Same-phase gammas to show in the two PSD plots: an inclusive MIN:MAX range, "
+                              "one value, or a comma-separated list from the run's same-phase grid.")
+    parser.add_argument("--independent-gammas", default=None,
+                         help="Independent-white gammas to show in the two PSD plots: an inclusive MIN:MAX range, "
+                              "one value, or a comma-separated list from the run's independent-white grid.")
     args = parser.parse_args()
 
-    result = run_validation(args.run_id, alpha_spec=args.alphas, gamma_spec=args.gammas)
+    try:
+        result = run_validation(
+            args.run_id,
+            alpha_spec=args.alphas,
+            gamma_spec=args.gammas,
+            same_phase_gamma_spec=args.same_phase_gammas,
+            independent_gamma_spec=args.independent_gammas,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     totals = result["hash_totals"]
     if totals["conditions_with_hashes"] == 0:
         hash_status = "no cached final-noise hashes found"
