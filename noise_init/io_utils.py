@@ -95,10 +95,14 @@ def environment_record() -> dict[str, Any]:
 def ensure_immutable_run(run_dir: Path, config: dict[str, Any], *, force: bool) -> None:
     """Create the run provenance once; force never changes source provenance."""
     manifest = run_dir / "run_manifest.json"
+    config = scientific_config(config)
     payload = {"resolved_config": config, "config_hash": sha256_text(canonical_json(config))}
     if manifest.exists():
         current = read_json(manifest)
-        if current.get("config_hash") != payload["config_hash"]:
+        saved = current.get("resolved_config", {})
+        if current.get("config_hash") != sha256_text(canonical_json(saved)):
+            raise RuntimeError(f"Run manifest config hash is corrupt: {manifest}")
+        if scientific_config(saved) != config:
             raise RuntimeError(
                 f"Run manifest differs at {manifest}; choose a different --run-id. "
                 "--force only replaces derived outputs."
@@ -107,3 +111,11 @@ def ensure_immutable_run(run_dir: Path, config: dict[str, Any], *, force: bool) 
     run_dir.mkdir(parents=True, exist_ok=True)
     write_json(manifest, payload, replace=False)
     write_json(run_dir / "environment.json", environment_record(), replace=False)
+
+
+def scientific_config(config):
+    """Only this historically injected presentation field is excluded from identity."""
+    import copy
+    result = copy.deepcopy(config)
+    result.get("analysis", {}).pop("two_panel_display", None)
+    return result

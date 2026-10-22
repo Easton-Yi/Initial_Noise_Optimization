@@ -20,7 +20,7 @@ class MetricContractTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.exp(-(eigenvalues * np.log(eigenvalues)).sum())), 4.0)
 
     def test_frontier_and_interpolation_prohibit_extrapolation(self):
-        points = [{"diversity": .1, "quality": .9}, {"diversity": .2, "quality": .8}, {"diversity": .3, "quality": .95}]
+        points = [{"diversity": .1, "quality": 1.0}, {"diversity": .2, "quality": .8}, {"diversity": .3, "quality": .95}]
         front = pareto_frontier(points)
         self.assertEqual(len(front), 2)
         self.assertIsNone(interpolate_within(front, .05))
@@ -44,7 +44,7 @@ class MetricContractTests(unittest.TestCase):
             for alpha in (.5, .6, .7)
             for gamma in (.0125, .1)
         ]
-        selected = _two_panel_rows(rows, {"alpha_values": (.6, .7), "gamma_values": (.0125, .1)})
+        selected = _two_panel_rows(rows, {"baseline": {"alpha_values": (.0, .1, .2, .3, .4, .5, .6, .7)}, "same_phase": {"alpha_values": (.6, .7), "gamma_values": (.0125, .1)}})
         self.assertEqual([row["alpha"] for row in selected if row["family"] == "baseline"], [.0, .1, .2, .3, .4, .5, .6, .7])
         self.assertTrue(all(row["alpha"] in (.6, .7) for row in selected if row["family"] != "baseline"))
 

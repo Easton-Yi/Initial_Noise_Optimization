@@ -27,27 +27,11 @@ class RunContract:
 
 
 def expected_condition_ids(config: dict[str, Any]) -> tuple[str, ...]:
-    """Expand the frozen grid without importing run_experiment (which imports analysis)."""
-    values: list[str] = []
-    baseline = config.get("baseline")
-    if not isinstance(baseline, dict):
-        raise RuntimeError("Run manifest has no baseline configuration")
-    if baseline.get("enabled", True):
-        values.extend(condition_id("baseline", float(alpha)) for alpha in baseline.get("alpha_values", []))
-    for section_name, family in (("same_phase_floor", "same_phase"),
-                                 ("independent_white", "independent_white")):
-        section = config.get(section_name)
-        if not isinstance(section, dict):
-            raise RuntimeError(f"Run manifest has no {section_name} configuration")
-        if section.get("enabled", False):
-            values.extend(condition_id(family, float(alpha), float(gamma))
-                          for alpha in section.get("alpha_values", [])
-                          for gamma in section.get("gamma_values", []))
-    if not values:
-        raise RuntimeError("Frozen run configuration contains no enabled conditions")
-    if len(set(values)) != len(values):
-        raise RuntimeError("Frozen run configuration expands to duplicate condition IDs")
-    return tuple(values)
+    from run_support import conditions
+    try:
+        return tuple(c.identifier for c in conditions(config))
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def load_run_contract(run_dir: str | Path) -> RunContract:
@@ -70,6 +54,12 @@ def load_run_contract(run_dir: str | Path) -> RunContract:
     blocks = {str(row["block_id"]): row for row in block_rows}
     if len(blocks) != len(block_rows):
         raise RuntimeError("Run block metadata contains duplicate block_id values")
+    prompts = {}
+    for block in blocks.values():
+        pid = str(block["prompt_id"])
+        if pid in prompts and prompts[pid] != block["prompt"]:
+            raise RuntimeError(f"Conflicting prompt text for prompt_id={pid}")
+        prompts[pid] = block["prompt"]
     gallery_size = int(config.get("experiment", {}).get("gallery_size", 0))
     if gallery_size != 4:
         raise RuntimeError(f"Frozen run configuration must use gallery_size=4, got {gallery_size}")
@@ -77,13 +67,54 @@ def load_run_contract(run_dir: str | Path) -> RunContract:
 
 
 def load_generation_records(run_dir: str | Path) -> list[dict[str, Any]]:
-    run_dir = Path(run_dir)
-    return [row for path in sorted(run_dir.glob("generations/**/samples.jsonl")) for row in read_jsonl(path)]
+    run_dir = Path(run_dir).resolve()
+    rows = []
+    for path in sorted(run_dir.glob("generations/**/samples.jsonl")):
+        for saved in read_jsonl(path):
+            row = dict(saved)
+            if row.get("image_path"):
+                resolved = resolve_recorded_image(run_dir, row)
+                if str(resolved) != row["image_path"]:
+                    row["recorded_image_path"] = row["image_path"]
+                    row["image_path"] = str(resolved)
+            rows.append(row)
+    return rows
+
+
+def resolve_recorded_image(run_dir: Path, row: dict[str, Any]) -> Path:
+    """Rebase only an identity-matching generation suffix, never search by basename.
+
+    Prefer the explicitly selected run over an old absolute root, even when the
+    old root still exists. Alias rows refer to their recorded source condition.
+    Resolution changes only the in-memory row; saved samples/metric hashes remain
+    unchanged and analysis still verifies each image against the metric record.
+    """
+    recorded = Path(row["image_path"])
+    try:
+        index = row["base_index"]
+        if type(index) is not int or index < 0:
+            return recorded
+        source = row.get("alias_of_condition_id") or row["condition_id"]
+        relative = Path("generations") / str(row["model_id"]) / str(row["block_id"]) / str(source) / f"image_{index:02d}.png"
+        root = Path(run_dir).resolve()
+        candidate = (root / relative).resolve()
+        # Reject traversal and require the stored suffix to match the full
+        # model/block/condition/sample identity, not merely image_00.png.
+        if candidate.is_relative_to(root) and recorded.parts[-len(relative.parts):] == relative.parts:
+            return candidate
+    except (KeyError, TypeError, ValueError):
+        pass  # The normal record-integrity checks report malformed metadata.
+    if not recorded.is_absolute():
+        candidate = (Path(run_dir).resolve() / recorded).resolve()
+        if candidate.is_relative_to(Path(run_dir).resolve()):
+            return candidate
+    return recorded
 
 
 def validate_generation_records(run_dir: str | Path, *, require_complete: bool) -> tuple[RunContract, list[dict[str, Any]], dict[tuple[str, str], list[dict[str, Any]]]]:
     """Validate all present galleries; optionally require the frozen Cartesian product."""
     contract = load_run_contract(run_dir)
+    expected_groups = contract.expected_groups
     rows = load_generation_records(run_dir)
     if not rows:
         raise RuntimeError("No generated sample records found")
@@ -106,10 +137,14 @@ def validate_generation_records(run_dir: str | Path, *, require_complete: bool) 
         except (TypeError, ValueError):
             malformed.append(f"{block_id}/{candidate}: base_index={row['base_index']!r}")
             continue
+        if type(row["base_index"]) is not int:
+            malformed.append(f"row {number}: base_index must be an integer")
+            continue
+        validate_condition_metadata(row, context=f"generation row {number}")
         key = (block_id, candidate)
         groups.setdefault(key, []).append(row)
         model_ids.add(str(row["model_id"]))
-        if key not in contract.expected_groups:
+        if key not in expected_groups:
             unexpected.append(f"{block_id}/{candidate}/{base_index}")
         block = contract.blocks.get(block_id)
         if block is not None and (row["prompt_id"] != block["prompt_id"] or row["prompt"] != block["prompt"]):
@@ -124,7 +159,7 @@ def validate_generation_records(run_dir: str | Path, *, require_complete: bool) 
         if len(gallery) != len(contract.base_indices) or set(indices) != expected_indices or len(set(indices)) != len(indices):
             bad_groups.append(f"{block_id}/{candidate}: count={len(gallery)}, indices={indices}")
 
-    missing_groups = sorted(contract.expected_groups - set(groups)) if require_complete else []
+    missing_groups = sorted(expected_groups - set(groups)) if require_complete else []
     issues = []
     _add_issue(issues, "malformed generation records", malformed)
     _add_issue(issues, "unexpected block/condition records", unexpected)
@@ -177,6 +212,12 @@ def validate_analysis_inputs(run_dir: str | Path) -> RunContract:
     _validate_per_image(per_image, generation_by_key, quality, str(metric_hash), issues)
     _validate_per_pair(per_pair, groups, pairwise, str(metric_hash), contract.base_indices, issues)
     _validate_per_group(per_group, groups, quality, pairwise, group_only, str(metric_hash), issues)
+    for filename, rows in (("per_image.csv", per_image), ("per_pair.csv", per_pair), ("per_group.csv", per_group)):
+        for row in rows:
+            validate_condition_metadata(row, context=filename)
+            block = contract.blocks.get(str(row.get("block_id")))
+            if block is None or any(row.get(key) != str(block[key]) for key in ("prompt_id", "prompt")):
+                issues.append(f"{filename}: prompt identity mismatch for {row.get('block_id')}")
     if issues:
         raise RuntimeError("Metric integrity check failed: " + "; ".join(issues) + "; rerun metrics")
     return contract
@@ -279,3 +320,20 @@ def _format_key(key: tuple[Any, ...]) -> str:
 def _add_issue(issues: list[str], label: str, examples: list[str]) -> None:
     if examples:
         issues.append(f"{label}={len(examples)} examples={examples[:3]}")
+
+
+def validate_condition_metadata(row, *, context):
+    try:
+        family = row.get("family") or row["condition_id"].split("/")[0]
+        alpha = float(row["alpha"])
+        gamma = None if family == "baseline" else float(row["gamma"])
+        if family not in {"baseline", "same_phase", "independent_white"} or not math.isfinite(alpha) or alpha < 0:
+            raise ValueError("invalid family/alpha")
+        if gamma is not None and (not math.isfinite(gamma) or not 0 <= gamma <= 1):
+            raise ValueError("invalid gamma")
+        if row["condition_id"] != condition_id(family, alpha, gamma):
+            raise ValueError("condition ID does not match family/alpha/gamma")
+        if family == "baseline" and row.get("gamma") not in (None, ""):
+            raise ValueError("baseline must have null gamma")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"{context}: invalid condition metadata {row.get('condition_id')}: {exc}") from exc

@@ -34,7 +34,7 @@ class NoiseValidationGridTests(unittest.TestCase):
         self.assertEqual(selected["independent_white"], (0.9,))
 
     def test_shared_gamma_rejected_for_disjoint_grids(self):
-        with self.assertRaisesRegex(ValueError, "gamma grids are disjoint"):
+        with self.assertRaisesRegex(ValueError, "selects no points"):
             _selected_gamma_grids("0.05", None, None, self.gammas)
 
     def test_shared_gamma_supported_for_common_grid(self):
@@ -42,9 +42,10 @@ class NoiseValidationGridTests(unittest.TestCase):
         selected = _selected_gamma_grids("0.2", None, None, common_grids)
         self.assertEqual(selected, {"same_phase": (0.2,), "independent_white": (0.2,)})
 
-    def test_shared_and_method_specific_flags_are_mutually_exclusive(self):
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            _selected_gamma_grids("0.1", "0.05", None, self.gammas)
+    def test_family_specific_overrides_common(self):
+        selected = _selected_gamma_grids("0:1", "0.05", None, self.gammas)
+        self.assertEqual(selected["same_phase"], (0.05,))
+        self.assertEqual(selected["independent_white"], (.5, .75, .9))
 
 
 if __name__ == "__main__":

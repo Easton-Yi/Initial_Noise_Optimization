@@ -52,10 +52,10 @@ class PipelineSmallTests(unittest.TestCase):
             run_dir = generate(config, config_path, [{"block_id": "b", "prompt_id": "p", "prompt": "test", "seed_batch_id": "s", "batch_seed": 1}], run_id="r", selected_conditions=None, force=False, adapter=adapter)
             # 2 baseline galleries + same-phase alpha=.5; alpha=.0 is an alias.
             self.assertEqual(adapter.calls, 3)
-            alias = read_jsonl(run_dir / "generations/fake/b/same_phase/alpha_0p0_gamma_0p1/samples.jsonl")
+            alias = read_jsonl(run_dir / "generations/fake/b/same_phase/alpha_0_gamma_0p1/samples.jsonl")
             self.assertEqual(len(alias), 4)
             self.assertTrue(all(row["is_exact_alias"] for row in alias))
-            self.assertTrue(all(row["alias_of_condition_id"] == "baseline/alpha_0p0" for row in alias))
+            self.assertTrue(all(row["alias_of_condition_id"] == "baseline/alpha_0" for row in alias))
 
     def test_full_grid_has_152_logical_conditions_and_143_unique_galleries(self):
         config = {"baseline": {"enabled": True, "alpha_values": [round(i / 10, 1) for i in range(8)]},

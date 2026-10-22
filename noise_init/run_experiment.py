@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,33 +11,18 @@ import yaml
 from PIL import Image
 
 from analysis import analyze_run
-from io_utils import alpha_token, condition_id, ensure_immutable_run, file_hash, read_json, read_jsonl, tensor_hash, write_json, write_jsonl
+from io_utils import ensure_immutable_run, file_hash, read_jsonl, tensor_hash, write_json, write_jsonl
 from metric_runner import evaluate_run
 from model_adapters import GenerationConfig, T2IModelAdapter, build_adapter
 from noise_methods import construct_noise, construct_raw_noise, load_or_create_noise_batch, noise_statistics
 
 
 REQUIRED_TOP_LEVEL = {"experiment", "model", "generation", "blocks", "baseline", "same_phase_floor", "independent_white", "quality_metrics", "diversity_metrics", "analysis"}
-NOISE_FREQUENCY_GRID_VERSION = "divgen_integer_fft_bin_indices_v1"
-NOISE_CONSTRUCTION_VERSION = "exact_white_endpoints_profiled_normalization_v2"
 LATENT_INJECTION_VERIFICATION_VERSION = "prepare_latents_capture_v1"
 
 
-@dataclass(frozen=True)
-class Condition:
-    family: str
-    alpha: float
-    gamma: float | None
-
-    @property
-    def identifier(self) -> str:
-        return condition_id(self.family, self.alpha, self.gamma)
-
-    @property
-    def method(self) -> str:
-        if self.family == "baseline":
-            return "white" if self.alpha == 0 else "pink"
-        return self.family
+from run_support import (Condition, conditions as frozen_conditions, resolve_run, add_display_arguments,
+                         display_selection, presentation_config, NOISE_FREQUENCY_GRID_VERSION, NOISE_CONSTRUCTION_VERSION)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -82,8 +65,11 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
     enabled_diversity = {"dreamsim_mean_pair_distance" if name == "dreamsim" else "lpips_alex_mean_pair_distance" if name == "lpips" else name for name, section in config["diversity_metrics"].items() if section.get("enabled", False)}
     if primary_pair["quality"] not in enabled_quality or primary_pair["diversity"] not in enabled_diversity:
         raise ValueError("analysis.primary_metric_pair must refer to enabled metrics")
+    frozen_conditions(config)
     for name in ("baseline", "same_phase_floor", "independent_white"):
         section = config[name]
+        if not section.get("enabled", name == "baseline"):
+            continue
         for alpha in section["alpha_values"]:
             if float(alpha) < 0: raise ValueError(f"{name}: alpha must be non-negative")
         for gamma in section.get("gamma_values", []):
@@ -101,11 +87,7 @@ def validate_config(config: dict[str, Any], config_path: Path) -> list[dict[str,
 
 
 def all_conditions(config: dict[str, Any], selected: str | None = None) -> list[Condition]:
-    values = [Condition("baseline", float(alpha), None) for alpha in config["baseline"]["alpha_values"] if config["baseline"].get("enabled", True)]
-    for key, family in (("same_phase_floor", "same_phase"), ("independent_white", "independent_white")):
-        section = config[key]
-        if section.get("enabled", False):
-            values += [Condition(family, float(alpha), float(gamma)) for alpha in section["alpha_values"] for gamma in section["gamma_values"]]
+    values = frozen_conditions(config)
     if not selected: return values
     wanted = set(selected.split(",")); parsed = []
     for token in wanted:
@@ -117,6 +99,8 @@ def all_conditions(config: dict[str, Any], selected: str | None = None) -> list[
             if gamma_value in (0.0, 1.0): raise ValueError("gamma=0 and gamma=1 are tensor-test endpoints, not generation conditions")
             parsed.append(Condition("same_phase" if family == "same" else "independent_white", float(alpha), gamma_value))
         else: raise ValueError(f"Unknown --conditions token: {token}")
+    if any(c not in values for c in parsed):
+        raise ValueError("--conditions must select enabled frozen conditions")
     return parsed
 
 
@@ -145,7 +129,12 @@ def _is_complete(sample_dir: Path, latents: torch.Tensor) -> bool:
 def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, Any]], *, run_id: str | None, selected_conditions: str | None, force: bool, adapter: T2IModelAdapter | None = None) -> Path:
     run_dir = _run_dir(config, config_path, run_id)
     ensure_immutable_run(run_dir, config, force=force)
-    write_jsonl(run_dir / "blocks.jsonl", blocks)
+    block_path = run_dir / "blocks.jsonl"
+    if block_path.exists():
+        if read_jsonl(block_path) != blocks:
+            raise RuntimeError("Frozen blocks differ; choose a new run id")
+    else:
+        write_jsonl(block_path, blocks)
     adapter = adapter or build_adapter(config["model"])
     spec = adapter.latent_spec(config["generation"]["height"], config["generation"]["width"], config["experiment"]["gallery_size"])
     generation_config = GenerationConfig(**{key: config["generation"][key] for key in ("height", "width", "num_inference_steps", "guidance_scale", "generation_batch_size", "output_format")})
@@ -157,7 +146,7 @@ def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, A
             latents = construct_noise(batch, condition.family, condition.alpha, condition.gamma, config["experiment"]["normalization_profile"])
             sample_dir = _sample_path(run_dir, adapter.model_id, block["block_id"], condition)
             if _is_complete(sample_dir, latents) and not force: continue
-            if _is_same_phase_white_alias(condition):
+            if _is_same_phase_white_alias(condition) and Condition("baseline", 0., None) in all_conditions(config):
                 _write_same_phase_white_alias(run_dir, adapter.model_id, block, condition, batch, latents, config)
                 continue
             # PNGs are source artefacts for all later metrics.  --force must not
@@ -226,110 +215,66 @@ def _generation_hash(config: dict[str, Any]) -> str:
     return sha256_text(config["model"], config["generation"])
 
 
-def _analysis_config_for_existing_run(run_dir: Path, requested_config: dict[str, Any], alpha_range: str, gamma_range: str) -> dict[str, Any]:
-    """Use frozen statistical settings while permitting a newer figure layout.
-
-    Analysis is derived from immutable metrics, so it must not silently adopt a
-    new bootstrap policy.  Presentation-only options are safe to refresh and
-    are recorded separately; this lets old complete runs be replotted after a
-    plotting-code upgrade without regenerating images or metric values.
-    """
-    manifest_path = run_dir / "run_manifest.json"
-    if not manifest_path.exists():
-        raise RuntimeError(f"No immutable run manifest found at {manifest_path}")
-    manifest = read_json(manifest_path)
-    frozen = manifest.get("resolved_config")
-    if not isinstance(frozen, dict) or not isinstance(frozen.get("analysis"), dict):
-        raise RuntimeError(f"Invalid resolved config in {manifest_path}")
-    config = copy.deepcopy(frozen)
-    presentation = requested_config["analysis"]
-    config["analysis"].update({
-        "primary_metric_pair": presentation["primary_metric_pair"],
-        "optional_detail_curves": presentation.get("optional_detail_curves", []),
-    })
-    # The display range must come from this run's frozen generation grid, not
-    # whatever the --config file currently contains: the YAML can be edited
-    # (a new grid, a different variant file) after the run was generated, and
-    # validating against it would silently select alpha/gamma values this run
-    # never actually produced.
-    _select_two_panel_display(config, alpha_range, gamma_range)
-    return config
+def _analysis_config_for_existing_run(run_dir, requested_config=None, alpha_range=None, gamma_range=None):
+    from result_integrity import load_run_contract
+    return presentation_config(load_run_contract(run_dir).config,
+        {"plot_alpha_range": alpha_range, "plot_gamma_range": gamma_range})
 
 
-def _parse_plot_range(value: str, flag: str) -> tuple[float, float]:
-    try:
-        lower_text, upper_text = value.split(":", 1)
-        lower, upper = float(lower_text), float(upper_text)
-    except ValueError as error:
-        raise ValueError(f"{flag} must use MIN:MAX, for example 0.3:0.9") from error
-    if lower > upper:
-        raise ValueError(f"{flag} minimum must not exceed its maximum")
-    return lower, upper
+def _select_two_panel_display(config, alpha_range=None, gamma_range=None):
+    # Compatibility helper; callers must keep the result separate from source identity.
+    config["analysis"]["two_panel_display"] = display_selection(config,
+        {"plot_alpha_range": alpha_range, "plot_gamma_range": gamma_range})
 
 
-def _select_two_panel_display(config: dict[str, Any], alpha_range: str, gamma_range: str) -> None:
-    """Select the inclusive two-panel display subset from the YAML experiment grid."""
-    alpha_lower, alpha_upper = _parse_plot_range(alpha_range, "--plot-alpha-range")
-    gamma_lower, gamma_upper = _parse_plot_range(gamma_range, "--plot-gamma-range")
-    # Baseline is always drawn in full in the two-panel plots (see
-    # _two_panel_rows), so its alpha grid must not gate which alpha values the
-    # proposed-family curves can display.
-    alpha_grids = [set(map(float, config[name]["alpha_values"])) for name in ("same_phase_floor", "independent_white")]
-    gamma_grids = [set(map(float, config[name]["gamma_values"])) for name in ("same_phase_floor", "independent_white")]
-    available_alpha = sorted(set.intersection(*alpha_grids))
-    available_gamma = sorted(set.intersection(*gamma_grids))
-    selected_alpha = [value for value in available_alpha if alpha_lower <= value <= alpha_upper]
-    selected_gamma = [value for value in available_gamma if gamma_lower <= value <= gamma_upper]
-    if not selected_alpha:
-        raise ValueError(f"--plot-alpha-range={alpha_range} selects no common alpha values from the YAML grids: {available_alpha}")
-    if not selected_gamma:
-        raise ValueError(f"--plot-gamma-range={gamma_range} selects no common gamma values from the YAML grids: {available_gamma}")
-    # Deliberately runtime-only: these presentation values are never defaults
-    # in a checked-in YAML configuration.
-    config["analysis"]["two_panel_display"] = {"alpha_values": selected_alpha, "gamma_values": selected_gamma}
-
-
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True); parser.add_argument("--stage", required=True, choices=("validate", "generate", "metrics", "analyze", "all"))
-    parser.add_argument("--run-id"); parser.add_argument("--prompt"); parser.add_argument("--batch-seed", type=int); parser.add_argument("--conditions"); parser.add_argument("--force", action="store_true")
-    parser.add_argument("--plot-alpha-range", metavar="MIN:MAX", help="Required for analyze/all: inclusive alpha range selected from the YAML grid")
-    parser.add_argument("--plot-gamma-range", metavar="MIN:MAX", help="Required for analyze/all: inclusive gamma range selected from the YAML grid")
-    args = parser.parse_args(); config_path = Path(args.config).resolve(); config = load_config(config_path); blocks = validate_config(config, config_path)
-    if args.stage in ("analyze", "all"):
-        if args.plot_alpha_range is None or args.plot_gamma_range is None:
-            parser.error("--stage analyze/all requires both --plot-alpha-range MIN:MAX and --plot-gamma-range MIN:MAX")
+    parser.add_argument("--config")
+    parser.add_argument("--stage", required=True, choices=("validate", "generate", "metrics", "analyze", "all"))
+    parser.add_argument("--run-id"); parser.add_argument("--run-dir")
+    parser.add_argument("--prompt"); parser.add_argument("--batch-seed", type=int)
+    parser.add_argument("--conditions"); parser.add_argument("--force", action="store_true")
+    add_display_arguments(parser)
+    args = parser.parse_args()
+    try:
+        if args.stage == "analyze":
+            from result_integrity import load_run_contract
+            root = None
+            if args.config:
+                config_path = Path(args.config).resolve()
+                requested = load_config(config_path)
+                root = config_path.parent.parent / requested.get("paths", {}).get("outputs_root", "outputs")
+                if not args.run_id and not args.run_dir:
+                    args.run_id = requested["experiment"]["name"]
+            run_dir = resolve_run(args.run_id, args.run_dir, outputs_root=root)
+            print(analyze_run(run_dir, presentation_config(load_run_contract(run_dir).config, vars(args))))
+            return
+        if not args.config:
+            parser.error("--config is required for generation/metrics/validation")
+        if args.run_dir:
+            parser.error("--run-dir is supported by the analyze stage; generation uses configured outputs_root")
+        config_path = Path(args.config).resolve(); config = load_config(config_path)
+        run_dir = _run_dir(config, config_path, args.run_id)
+        if args.stage == "metrics":
+            ensure_immutable_run(run_dir, config, force=args.force)
+            evaluate_run(run_dir, config, force=args.force)
+            return
+        blocks = validate_config(config, config_path)
+        if args.prompt is not None:
+            if args.batch_seed is None: parser.error("--prompt requires --batch-seed")
+            blocks = [{"block_id": f"smoke_{args.batch_seed}", "prompt_id": "smoke", "prompt": args.prompt,
+                       "seed_batch_id": "smoke", "batch_seed": args.batch_seed}]
+        if args.stage == "validate":
+            print(f"valid: {len(blocks)} blocks, {len(all_conditions(config, args.conditions))} conditions")
+            return
+        presentation = presentation_config(config, vars(args)) if args.stage == "all" else None
+        run_dir = generate(config, config_path, blocks, run_id=args.run_id,
+                           selected_conditions=args.conditions, force=args.force)
         if args.stage == "all":
-            # Stage "all" generates data with this exact config in the same
-            # invocation, so its grid is authoritative here; validate eagerly
-            # to fail fast before spending time on generation. Stage "analyze"
-            # instead validates against the run's frozen grid, further below,
-            # once that frozen config has been loaded.
-            try:
-                _select_two_panel_display(config, args.plot_alpha_range, args.plot_gamma_range)
-            except ValueError as error:
-                parser.error(str(error))
-    elif args.plot_alpha_range is not None or args.plot_gamma_range is not None:
-        parser.error("--plot-alpha-range and --plot-gamma-range are valid only with --stage analyze or --stage all")
-    if args.prompt is not None:
-        if args.batch_seed is None: parser.error("--prompt requires --batch-seed")
-        blocks = [{"block_id": f"smoke_{args.batch_seed}", "prompt_id": "smoke", "prompt": args.prompt, "seed_batch_id": "smoke", "batch_seed": args.batch_seed}]
-    if args.stage == "validate":
-        print(f"valid: {len(blocks)} blocks, {len(all_conditions(config, args.conditions))} conditions"); return
-    run_dir = _run_dir(config, config_path, args.run_id)
-    if args.stage in ("generate", "all"):
-        run_dir = generate(config, config_path, blocks, run_id=args.run_id, selected_conditions=args.conditions, force=args.force)
-    elif args.stage == "metrics":
-        # Metric values are scientific artefacts, so reject a run created by a
-        # different noise or metric configuration.
-        ensure_immutable_run(run_dir, config, force=args.force)
-    elif args.stage == "analyze":
-        try:
-            config = _analysis_config_for_existing_run(run_dir, config, args.plot_alpha_range, args.plot_gamma_range)
-        except ValueError as error:
-            parser.error(str(error))
-    if args.stage in ("metrics", "all"): evaluate_run(run_dir, config, force=args.force)
-    if args.stage in ("analyze", "all"): analyze_run(run_dir, config)
+            evaluate_run(run_dir, config, force=args.force)
+            print(analyze_run(run_dir, presentation))
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__": main()
