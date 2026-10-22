@@ -1,4 +1,4 @@
-"""Block-level aggregation, paired bootstrap, Pareto and no-extrapolation Q--D analysis."""
+"""Prompt-equal Q-D statistics with the original plot styles and frozen run grids."""
 from __future__ import annotations
 
 import csv
@@ -7,7 +7,8 @@ from typing import Any
 
 import numpy as np
 
-from io_utils import read_json, write_json
+from io_utils import read_json, write_json, condition_id, file_hash
+from run_support import new_output, input_hashes, presentation_config, display_selection, Condition, selected_condition
 from result_integrity import enabled_metric_names, validate_analysis_inputs
 
 
@@ -35,28 +36,31 @@ def interpolate_within(points: list[dict[str, Any]], diversity: float) -> float 
     return None
 
 
-def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
-    run_dir, analysis_dir = Path(run_dir), Path(run_dir) / "analysis"
-    contract = validate_analysis_inputs(run_dir)
+def analyze_run(run_dir: str | Path, config=None, *, block_ids=None, output_dir=None, kind="overall", contract=None, make_plots=True):
+    run_dir = Path(run_dir)
+    contract = contract or validate_analysis_inputs(run_dir)
+    # Only presentation is accepted from callers; all statistics use frozen settings.
+    requested = config
+    config = presentation_config(contract.config)
+    if requested is not None:
+        config["analysis"]["two_panel_display"] = requested.get("analysis", {}).get("two_panel_display") or display_selection(contract.config)
+        config["analysis"]["primary_metric_pair"] = requested.get("analysis", {}).get("primary_metric_pair", config["analysis"]["primary_metric_pair"])
+    selected_blocks = set(contract.blocks) if block_ids is None else set(block_ids)
+    if not selected_blocks or not selected_blocks <= set(contract.blocks):
+        raise ValueError("Analysis block selection must be a nonempty subset of frozen blocks")
+    analysis_dir = Path(output_dir) if output_dir is not None else new_output(run_dir, kind)
     group_rows = _read_csv(run_dir / "metrics" / "per_group.csv")
+    group_rows = [row for row in group_rows if row["block_id"] in selected_blocks]
     if not group_rows:
         raise RuntimeError("Metrics have not been computed")
     quality_metrics, pairwise_metrics, group_only_metrics = enabled_metric_names(contract.config)
     diversity_metrics = pairwise_metrics + group_only_metrics
     if not quality_metrics or not diversity_metrics:
         raise RuntimeError("Analysis requires at least one enabled quality and diversity metric")
-    frozen_analysis = contract.config["analysis"]
-    by_metric: dict[str, dict[tuple[str, str], dict[str, dict[str, Any]]]] = {}
-    for row in group_rows:
-        key = (row["block_id"], row["condition_id"])
-        by_metric.setdefault(row["metric"], {}).setdefault(key, {})[row["metric"]] = row
-    # Make a conventional block/condition/metric map.
-    values: dict[tuple[str, str], dict[str, float]] = {}
-    metadata: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in group_rows:
-        key = (row["block_id"], row["condition_id"])
-        values.setdefault(key, {})[row["metric"]] = float(row["score"])
-        metadata.setdefault(key, row)
+    frozen_analysis = dict(contract.config["analysis"])
+    frozen_analysis["bootstrap_unit"] = "prompt"
+    values, metadata = prompt_values(group_rows, contract.blocks)
+    prompt_count = len({str(contract.blocks[b]["prompt_id"]) for b in selected_blocks})
     aggregates, paired, frontier_rows, improvement_rows, improvement_summary_rows, interval_rows = [], [], [], [], [], []
     conditions = sorted({condition for _, condition in values})
     for quality in quality_metrics:
@@ -68,7 +72,7 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                 d = np.array([values[(block, condition)][diversity] for block in sorted(blocks)])
                 q_interval, d_interval = _bootstrap(q, frozen_analysis), _bootstrap(d, frozen_analysis)
                 condition_meta = _condition_metadata(metadata[(next(iter(blocks)), condition)])
-                aggregates.append({"condition_id": condition, "quality_metric": quality, "diversity_metric": diversity, "quality": q.mean(), "diversity": d.mean(), "block_count": len(blocks), "quality_se": q_interval["standard_error"], "diversity_se": d_interval["standard_error"], "quality_ci_low": q_interval["ci_low"], "quality_ci_high": q_interval["ci_high"], "diversity_ci_low": d_interval["ci_low"], "diversity_ci_high": d_interval["ci_high"], **condition_meta, "curve_id": _curve_id(condition_meta)})
+                aggregates.append({"condition_id": condition, "quality_metric": quality, "diversity_metric": diversity, "quality": q.mean(), "diversity": d.mean(), "prompt_count": prompt_count, "block_count": len(selected_blocks), "quality_se": q_interval["standard_error"], "diversity_se": d_interval["standard_error"], "quality_ci_low": q_interval["ci_low"], "quality_ci_high": q_interval["ci_high"], "diversity_ci_low": d_interval["ci_low"], "diversity_ci_high": d_interval["ci_high"], **condition_meta, "curve_id": _curve_id(condition_meta)})
             curve_rows = [row for row in aggregates if row["quality_metric"] == quality and row["diversity_metric"] == diversity]
             for curve_id in sorted({row["curve_id"] for row in curve_rows}):
                 frontier_rows.extend(pareto_frontier([row for row in curve_rows if row["curve_id"] == curve_id]))
@@ -76,7 +80,12 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
             for curve_id in sorted({row["curve_id"] for row in curve_rows if row["curve_id"] != "baseline"}):
                 ours = pareto_frontier([row for row in curve_rows if row["curve_id"] == curve_id])
                 example = ours[0] if ours else {"family": "unknown", "gamma": ""}
-                if len(baseline) < 2 or len(ours) < 2: continue
+                if len(baseline) < 2 or len(ours) < 2:
+                    unavailable = {"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id,
+                                   "family": example["family"], "gamma": example["gamma"], "available": False,
+                                   "status": "unavailable", "reason": "baseline_disabled" if not baseline else "insufficient_frontier_points"}
+                    improvement_rows.append(unavailable); improvement_summary_rows.append(unavailable)
+                    continue
                 lo, hi = max(baseline[0]["diversity"], ours[0]["diversity"]), min(baseline[-1]["diversity"], ours[-1]["diversity"])
                 if lo > hi:
                     unavailable = {"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": False, "reason": "no_shared_diversity_range"}
@@ -98,19 +107,23 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
                         point_improvements.append(delta)
                         improvement_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": True, "target_diversity": target, "quality_improvement": delta, **uncertainty})
                 improvement_summary_rows.append({"quality_metric": quality, "diversity_metric": diversity, "curve_id": curve_id, "family": example["family"], "gamma": example["gamma"], "available": bool(point_improvements), "matched_diversity_low": lo, "matched_diversity_high": hi, "mean_quality_improvement": float(np.mean(point_improvements)) if point_improvements else "", **summary_uncertainty})
-    # Paired effects use only block intersections, never individual images/pairs.
+    # Pair condition effects within prompts after averaging their seed groups.
     for condition in conditions:
         family = _condition_metadata(metadata[(next(block for block, candidate in values if candidate == condition), condition)])["family"]
-        reference = "baseline/alpha_0p0" if family == "baseline" else _anchor_condition(condition)
+        reference = condition_id("baseline", 0.) if family == "baseline" else _anchor_condition(condition)
         for quality in quality_metrics:
             for diversity in diversity_metrics:
                 common = sorted({block for block, candidate in values if candidate == condition and (block, reference) in values and quality in values[(block, candidate)] and diversity in values[(block, candidate)] and quality in values[(block, reference)] and diversity in values[(block, reference)]})
                 for block in common:
-                    paired.append({"block_id": block, "condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity,
+                    paired.append({"prompt_id": block, "condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity,
                                    "delta_quality": values[(block, condition)][quality] - values[(block, reference)][quality], "delta_diversity": values[(block, condition)][diversity] - values[(block, reference)][diversity]})
+                if not common:
+                    interval_rows.append({"condition_id": condition, "reference_condition_id": reference,
+                        "quality_metric": quality, "diversity_metric": diversity, "status": "unavailable",
+                        "reason": "reference_condition_not_enabled"})
                 if common:
                     diffs = np.array([values[(b, condition)][quality] - values[(b, reference)][quality] for b in common])
-                    interval_rows.append({"condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity, **_bootstrap(diffs, frozen_analysis)})
+                    interval_rows.append({"condition_id": condition, "reference_condition_id": reference, "quality_metric": quality, "diversity_metric": diversity, "status": "passed", "block_count": len(selected_blocks), **_bootstrap(diffs, frozen_analysis)})
     tables_dir = analysis_dir / "tables"
     _write_csv(tables_dir / "all_curve_points.csv", aggregates)
     _write_csv(tables_dir / "paired_effects.csv", paired)
@@ -118,17 +131,43 @@ def analyze_run(run_dir: str | Path, config: dict[str, Any]) -> None:
     _write_csv(tables_dir / "matched_diversity.csv", improvement_rows)
     _write_csv(tables_dir / "matched_diversity_summary.csv", improvement_summary_rows)
     _write_csv(tables_dir / "bootstrap_results.csv", interval_rows)
-    _plots(analysis_dir, aggregates, improvement_summary_rows, config)
+    if make_plots:
+        _plots(analysis_dir, aggregates, improvement_summary_rows, config)
     run_manifest = read_json(run_dir / "run_manifest.json")
     write_json(analysis_dir / "analysis_manifest.json", {
+        "code_hashes": {name: file_hash(Path(__file__).parent / name) for name in
+                        ("analysis.py", "run_support.py", "result_integrity.py")},
+        "aggregation_unit": "prompt_equal_after_seed_group_mean", "bootstrap_unit": "prompt",
+        "paired_draws": True, "block_count": len(selected_blocks),
+        "prompt_count": len({str(contract.blocks[b]["prompt_id"]) for b in selected_blocks}),
+        "block_ids": sorted(selected_blocks), "input_hashes": input_hashes(run_dir),
+        "aggregate_table_hash": file_hash(tables_dir / "all_curve_points.csv"),
+        "source_run_dir": str(run_dir.resolve()),
+        "image_path_resolution": "prefer current run for exact recorded model/block/source-condition/sample suffix; retain source records; verify metric image hashes",
+        "baseline_comparisons": "available" if any(c.startswith("baseline/") for c in conditions) else "unavailable: baseline disabled",
         "source_run_config_hash": run_manifest.get("config_hash"),
         "frozen_statistical_analysis": contract.config["analysis"],
+        "bootstrap_settings": {key: frozen_analysis[key] for key in ("bootstrap_seed", "bootstrap_replicates", "confidence_level", "bootstrap_unit")},
         "presentation_analysis": {
             "primary_metric_pair": config["analysis"]["primary_metric_pair"],
             "optional_detail_curves": config["analysis"].get("optional_detail_curves", []),
             "two_panel_display": config["analysis"].get("two_panel_display"),
         },
     })
+
+    return analysis_dir
+
+
+def prompt_values(rows, blocks):
+    """Equal prompt means, after averaging every seed group of that prompt."""
+    samples, metadata = {}, {}
+    for row in rows:
+        key = (str(blocks[row["block_id"]]["prompt_id"]), row["condition_id"])
+        samples.setdefault(key, {}).setdefault(row["metric"], []).append(float(row["score"]))
+        metadata.setdefault(key, row)
+    values = {key: {metric: float(np.mean(scores)) for metric, scores in metrics.items()}
+              for key, metrics in samples.items()}
+    return values, metadata
 
 
 def _condition_metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -161,7 +200,7 @@ def _bootstrap(values: np.ndarray, config: dict[str, Any]) -> dict[str, Any]:
     rng = np.random.default_rng(int(config["bootstrap_seed"]))
     means = np.array([values[rng.integers(0, len(values), len(values))].mean() for _ in range(int(config["bootstrap_replicates"]))])
     alpha = (1 - float(config["confidence_level"])) / 2
-    return {"point_estimate": float(values.mean()), "standard_error": float(means.std(ddof=1)), "ci_low": float(np.quantile(means, alpha)), "ci_high": float(np.quantile(means, 1 - alpha)), "block_count": len(values)}
+    return {"point_estimate": float(values.mean()), "standard_error": float(means.std(ddof=1)) if len(means) > 1 else 0.0, "ci_low": float(np.quantile(means, alpha)), "ci_high": float(np.quantile(means, 1 - alpha)), "prompt_count": len(values)}
 
 
 def _bootstrap_matched_improvements(values: dict[tuple[str, str], dict[str, float]], baseline_conditions: list[str], ours_conditions: list[str], quality: str, diversity: str, targets: list[float], config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -222,12 +261,13 @@ def _plots(analysis_dir: Path, rows: list[dict[str, Any]], summaries: list[dict[
     if not pairs:
         return
     requested = config["analysis"].get("primary_metric_pair", {})
-    primary = (requested.get("quality", "hpsv3"), requested.get("diversity", "dreamsim_mean_pair_distance"))
+    primary = (requested["quality"], requested["diversity"])
     if primary not in pairs:
         raise RuntimeError(f"Configured primary metric pair has no complete results: {primary}")
     display = _two_panel_display(config)
     primary_rows = _pair_rows(rows, primary)
-    _plot_baseline_qd(analysis_dir / "primary" / "baseline_qd.png", primary_rows, primary)
+    if any(row["family"] == "baseline" for row in primary_rows):
+        _plot_baseline_qd(analysis_dir / "primary" / "baseline_qd.png", _two_panel_rows(primary_rows, display), primary)
     if not any(row["curve_id"] != "baseline" for row in rows):
         return
     _plot_methods_two_panel(analysis_dir / "primary" / "methods_qd_two_panel.png", primary_rows, primary, display)
@@ -275,7 +315,7 @@ def _series(rows: list[dict[str, Any]], curve_id: str) -> list[dict[str, Any]]:
 def _plot_baseline(axis, rows: list[dict[str, Any]]) -> None:
     series = _series(rows, "baseline")
     if not series:
-        raise RuntimeError("A Q-D comparison requires the baseline curve")
+        return
     axis.plot([row["diversity"] for row in series], [row["quality"] for row in series], color="black", marker="o", linewidth=2.2, label="baseline")
 
 
@@ -345,14 +385,22 @@ def _padded_limits(values: list[float]) -> tuple[float, float]:
     return lower - padding, upper + padding
 
 
-def _plot_methods_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
+def _plot_methods_two_panel(target, rows, pair, display):
     import matplotlib.pyplot as plt
     rows = _two_panel_rows(rows, display)
-    figure, axes = plt.subplots(1, 2, figsize=(13.5, 4.5), sharex=False, sharey=False, constrained_layout=True)
-    _plot_family_panel(axes[0], rows, "same_phase", pair)
-    _plot_family_panel(axes[1], rows, "independent_white", pair)
+    families = [f for f in ("same_phase", "independent_white") if any(row["family"] == f for row in rows)]
+    if not families:
+        if rows:
+            _plot_baseline_qd(target, rows, pair)
+        return
+    figure, axes = plt.subplots(1, len(families), figsize=(13.5 if len(families) == 2 else 6.75, 4.5),
+                                sharex=False, sharey=False, squeeze=False, constrained_layout=True)
+    for axis, family in zip(axes[0], families):
+        _plot_family_panel(axis, rows, family, pair)
     figure.suptitle(f"Q–D comparison ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
+
+
 
 
 def _plot_fixed_alpha_family_panel(axis, rows: list[dict[str, Any]], family: str, pair: tuple[str, str], *, legend: bool = True) -> None:
@@ -388,56 +436,36 @@ def _plot_baseline_alpha_points(axis, rows: list[dict[str, Any]], *, annotate: b
     """Show baseline as alpha-labelled reference points, not a gamma trajectory."""
     baseline = _series(rows, "baseline")
     if not baseline:
-        raise RuntimeError("A Q-D comparison requires baseline points")
+        return
     axis.scatter([row["diversity"] for row in baseline], [row["quality"] for row in baseline], color="black", s=32, label="baseline α points", zorder=3)
     if annotate:
         for row in baseline:
             axis.annotate(f"α={_format_grid_value(float(row['alpha']))}", (row["diversity"], row["quality"]), fontsize=7, xytext=(3, 3), textcoords="offset points")
 
 
-def _plot_fixed_alpha_gamma_two_panel(target: Path, rows: list[dict[str, Any]], pair: tuple[str, str], display: dict[str, tuple[float, ...]]) -> None:
+def _plot_fixed_alpha_gamma_two_panel(target, rows, pair, display):
     import matplotlib.pyplot as plt
     rows = _two_panel_rows(rows, display)
-    figure, axes = plt.subplots(1, 2, figsize=(13.5, 4.5), sharex=False, sharey=False, constrained_layout=True)
-    _plot_fixed_alpha_family_panel(axes[0], rows, "same_phase", pair)
-    _plot_fixed_alpha_family_panel(axes[1], rows, "independent_white", pair)
+    families = [f for f in ("same_phase", "independent_white") if any(row["family"] == f for row in rows)]
+    if not families:
+        if rows:
+            _plot_baseline_qd(target, rows, pair)
+        return
+    figure, axes = plt.subplots(1, len(families), figsize=(13.5 if len(families) == 2 else 6.75, 4.5),
+                                sharex=False, sharey=False, squeeze=False, constrained_layout=True)
+    for axis, family in zip(axes[0], families):
+        _plot_fixed_alpha_family_panel(axis, rows, family, pair)
     figure.suptitle(f"Diagnostic fixed-α γ sweeps ({_display_title_fragment(display)}): {_metric_label(pair[0])} × {_metric_label(pair[1])}")
     _save_figure(figure, target)
 
 
-def _two_panel_display(config: dict[str, Any]) -> dict[str, tuple[float, ...]]:
-    section = config["analysis"].get("two_panel_display")
-    if not isinstance(section, dict) or not section.get("alpha_values") or not section.get("gamma_values"):
-        raise RuntimeError("Two-panel plotting requires explicit --plot-alpha-range and --plot-gamma-range")
-    return {"alpha_values": tuple(float(value) for value in section["alpha_values"]),
-            "gamma_values": tuple(float(value) for value in section["gamma_values"])}
+def _two_panel_display(config):
+    return config["analysis"].get("two_panel_display") or display_selection(config)
 
 
-def _display_title_fragment(display: dict[str, tuple[float, ...]]) -> str:
-    def endpoint(values: tuple[float, ...]) -> str:
-        return _format_grid_value(min(values)) if len(values) == 1 else f"{_format_grid_value(min(values))}–{_format_grid_value(max(values))}"
-    return f"α={endpoint(display['alpha_values'])}, γ={endpoint(display['gamma_values'])}"
-
-
-def _two_panel_rows(rows: list[dict[str, Any]], display: dict[str, tuple[float, ...]]) -> list[dict[str, Any]]:
-    """Presentation subset: full baseline, selected proposed alpha/gamma grid."""
-    selected = []
-    for row in rows:
-        # Baseline is the fixed reference for every comparison.  Its complete
-        # alpha sweep remains visible even when proposed curves are zoomed to
-        # a selected alpha/gamma display range.
-        if row["family"] == "baseline":
-            selected.append(row)
-            continue
-        alpha = float(row["alpha"])
-        if not any(np.isclose(alpha, allowed) for allowed in display["alpha_values"]):
-            continue
-        if not any(np.isclose(float(row["gamma"]), allowed) for allowed in display["gamma_values"]):
-            continue
-        selected.append(row)
-    if not any(row["family"] == "baseline" for row in selected):
-        raise RuntimeError("Two-panel display subset contains no baseline points")
-    return selected
+def _two_panel_rows(rows, display):
+    return [row for row in rows if selected_condition(Condition(row["family"], float(row["alpha"]),
+            None if row["family"] == "baseline" else float(row["gamma"])), display)]
 
 
 def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> None:
@@ -449,6 +477,9 @@ def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> No
         series = sorted([row for row in rows if row.get("family") == family and row.get("available")], key=lambda row: float(row["gamma"]))
         if not series:
             continue
+        series = [row for row in series if row.get("bootstrap_ci_low") not in (None, "")]
+        if not series:
+            continue
         gamma = [float(row["gamma"]) for row in series]
         gain = [float(row["mean_quality_improvement"]) for row in series]
         lower = [value - float(row["bootstrap_ci_low"]) for value, row in zip(gain, series)]
@@ -456,7 +487,15 @@ def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> No
         # Gamma grids may be deliberately non-uniform (for example the SDXL
         # finer sweep).  Use their ordered grid positions so each tested value
         # remains readable rather than clustering all low gamma values near 0.
-        axis.errorbar([positions[value] for value in gamma], gain, yerr=[lower, upper], color=color, marker="o", capsize=3, label=label)
+        x = [positions[value] for value in gamma]
+        if min(lower + upper) >= 0:
+            axis.errorbar(x, gain, yerr=[lower, upper], color=color, marker="o", capsize=3, label=label)
+        else:
+            lows = [float(row["bootstrap_ci_low"]) for row in series]
+            highs = [float(row["bootstrap_ci_high"]) for row in series]
+            middle = [(lo + hi) / 2 for lo, hi in zip(lows, highs)]
+            axis.errorbar(x, middle, yerr=[(hi-lo)/2 for lo, hi in zip(lows, highs)], color=color, fmt="none", capsize=3)
+            axis.plot(x, gain, color=color, marker="o", label=label)
     axis.axhline(0, color="black", linewidth=.8)
     axis.set(xlabel="γ", ylabel="Mean Δ quality at matched diversity", title="Matched-diversity quality gain")
     axis.set_xticks(range(len(gammas)))
@@ -464,7 +503,8 @@ def _plot_matched_diversity_gain(target: Path, rows: list[dict[str, Any]]) -> No
     if gammas:
         axis.set_xlim(-.5, len(gammas) - .5)
     axis.grid(alpha=.2)
-    axis.legend(frameon=False)
+    if axis.get_legend_handles_labels()[0]:
+        axis.legend(frameon=False)
     _save_figure(figure, target)
 
 
@@ -496,3 +536,29 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fields = sorted({key for row in rows for key in row})
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+
+
+def _display_title_fragment(display):
+    def endpoint(values):
+        return _format_grid_value(min(values)) if len(values) == 1 else f"{_format_grid_value(min(values))}–{_format_grid_value(max(values))}"
+    grids = [grid for family, grid in display.items() if family != "baseline"]
+    alphas = sorted({value for grid in grids for value in grid["alpha_values"]})
+    gammas = sorted({value for grid in grids for value in grid["gamma_values"]})
+    return f"α={endpoint(alphas)}, γ={endpoint(gammas)}" if grids else "baseline"
+
+
+def validate_aggregate_rows(rows, contract, source):
+    """Reject incomplete/ambiguous tables before plotting existing aggregates."""
+    import math
+    from result_integrity import validate_condition_metadata
+    quality, pairwise, group_only = enabled_metric_names(contract.config)
+    expected = {(c, q, d) for c in contract.condition_ids for q in quality for d in pairwise + group_only}
+    seen = set()
+    for row in rows:
+        validate_condition_metadata(row, context=str(source))
+        key = (row["condition_id"], row["quality_metric"], row["diversity_metric"])
+        if key in seen or key not in expected or not all(math.isfinite(float(row[k])) for k in ("quality", "diversity")):
+            raise RuntimeError(f"{source}: duplicate/unexpected/non-finite curve point {key}")
+        seen.add(key)
+    if seen != expected:
+        raise RuntimeError(f"{source}: missing {len(expected - seen)} configured curve points; rerun analysis")

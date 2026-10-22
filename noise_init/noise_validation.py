@@ -1,673 +1,608 @@
 #!/usr/bin/env python3
-"""Post-hoc frequency validation for completed white-floor noise-cache experiments.
+"""Streaming frozen-cache reconstruction and spectral diagnostics (no resampling).
 
-Reconstructs every noise condition from the cached ``base_white``/``independent_eta``
-tensors using the exact generation functions in ``noise_methods.py`` -- it never
-samples replacement noise and never loads an image-generation model. Validates
-empirical radial PSDs against the theoretical intervention PSDs, checks cached
-final-noise hashes where available, and reports the baseline alpha with the
-closest normalized log-PSD for every same-phase/independent-white condition.
+Hash equality, summary-statistic agreement, algebraic checks and finite-sample
+PSD diagnostics are independent evidence. Only saved final hashes can establish
+bit-exact agreement with the recorded pre-adapter input tensors.
 """
 from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass, field
+import math
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
 
-from io_utils import condition_id, read_json, read_jsonl, tensor_hash
-from noise_methods import (NoiseBatch, construct_raw_noise, noise_statistics, normalize, pink,
-                           radial_frequency_grid)
+from io_utils import read_json, read_jsonl, write_json, tensor_hash, file_hash, derived_seed
+from noise_methods import NoiseBatch, construct_raw_noise, noise_statistics, normalize, pink, pink_filter, radial_frequency_grid
+from result_integrity import load_run_contract, validate_condition_metadata
+from run_support import (Condition as ConditionSpec, conditions, resolve_run, display_selection, parse_selection,
+                         selected_condition, add_display_arguments, new_output,
+                         NOISE_CONSTRUCTION_VERSION, NOISE_FREQUENCY_GRID_VERSION)
 
-ALPHAS = [round(0.1 * i, 1) for i in range(8)]
-GAMMAS = [round(0.1 * i, 1) for i in range(1, 10)]
-FAMILIES = ("same_phase", "independent_white")
-# Resolved-config keys for the same two families -- the config section for "same_phase" is
-# named "same_phase_floor" (matching run_experiment.py's YAML schema).
-FAMILIES_CONFIG_KEYS = ("same_phase_floor", "independent_white")
-
-PRIMARY_ALPHA_MIN, PRIMARY_ALPHA_MAX = 0.3, 0.7
-PRIMARY_GAMMA_MAX = 0.6
-CONTROL_ALPHA_MAX = 0.2
-# Defaults used when --alphas/--gammas are not passed on the CLI.
-DEFAULT_SELECTED_ALPHAS = (0.0, 0.3, 0.5, 0.7)
-DEFAULT_SELECTED_GAMMAS = (0.1, 0.3, 0.6, 0.9)
+VALIDATION_VERSION = "spectral_v3"
 NUM_RADIAL_BINS = 24
-# Cycled by index (not looked up by value), so any --alphas/--gammas selection --
-# a range, a single value, or an arbitrary discrete list -- gets a distinct style.
-LINESTYLE_CYCLE = ("solid", (0, (4, 1.5)), (0, (1, 1)), (0, (3, 1, 1, 1)), (0, (5, 1, 1, 1, 1, 1)), (0, (1, 1, 3, 1)))
-SAME_PHASE_EXACT_TOLERANCE = 1e-3
-PSD_SHAPE_TOLERANCE = 0.35
-EPS = 1e-12
-# SHA-256 final-noise hashes are not bit-reproducible across FFT library builds
-# (confirmed: reconstructed std/l2_norm/psd_mean agree with the recorded
-# noise_statistics.json to ~1e-7, i.e. float32 precision, even when the hash
-# differs) -- this tolerance distinguishes that from an actual formula error.
+EXACT_RTOL, EXACT_ATOL = 2e-5, 2e-5
 NUMERIC_HASH_TOLERANCE = 1e-4
 STATS_KEYS_FOR_NUMERIC_CHECK = ("std", "l2_norm", "psd_mean", "psd_high_frequency_mean")
+EPS = 1e-12
+FAMILIES = ("same_phase", "independent_white")
 
 
-@dataclass(frozen=True)
-class ConditionSpec:
-    family: str
-    alpha: float
-    gamma: float | None
-
-    @property
-    def identifier(self) -> str:
-        return condition_id(self.family, self.alpha, self.gamma)
-
-    @property
-    def gamma_for_theory(self) -> float:
-        return 0.0 if self.gamma is None else self.gamma
-
-    @property
-    def region(self) -> str:
-        if self.family == "baseline":
-            return "baseline"
-        if self.alpha < CONTROL_ALPHA_MAX + 1e-9:
-            return "control_alpha"
-        if self.gamma is not None and self.gamma > PRIMARY_GAMMA_MAX + 1e-9:
-            return "high_gamma_endpoint"
-        return "primary"
+# Legacy helpers delegate to the same grid/selection implementation.
+def full_condition_grid(baseline_alphas, proposed_alphas, proposed_gammas):
+    config = {"baseline": {"enabled": bool(baseline_alphas), "alpha_values": baseline_alphas}}
+    for family, key in (("same_phase", "same_phase_floor"), ("independent_white", "independent_white")):
+        config[key] = {"enabled": bool(proposed_alphas[family]), "alpha_values": proposed_alphas[family],
+                       "gamma_values": proposed_gammas[family]}
+    return conditions(config)
 
 
-def full_condition_grid(baseline_alphas: list[float], proposed_alphas: list[float],
-                         proposed_gammas: list[float]) -> list[ConditionSpec]:
-    conditions = [ConditionSpec("baseline", alpha, None) for alpha in baseline_alphas]
-    for family in FAMILIES:
-        conditions += [ConditionSpec(family, alpha, gamma) for alpha in proposed_alphas for gamma in proposed_gammas]
-    return conditions
+def _selected_gamma_grids(gamma_spec, same_phase_gamma_spec, independent_gamma_spec, grids):
+    specs = {"same_phase": same_phase_gamma_spec, "independent_white": independent_gamma_spec}
+    return {family: tuple(parse_selection(specs[family] if specs[family] is not None else gamma_spec,
+                                         grid, family + " gamma")) if grid else () for family, grid in grids.items()}
 
 
-# --------------------------------------------------------------------------- #
-# Cache / run discovery
-# --------------------------------------------------------------------------- #
-
-def _linestyle_for(index: int) -> Any:
-    return LINESTYLE_CYCLE[index % len(LINESTYLE_CYCLE)]
-
-
-def _format_grid_value(value: float) -> str:
-    # Some runs use a finer grid (e.g. gamma=0.0125) where "%.1f" would collapse distinct values
-    # to the same label -- strip trailing zeros instead of assuming one fixed decimal width.
-    return f"{value:.4f}".rstrip("0").rstrip(".")
-
-
-def _parse_value_spec(spec: str, grid: list[float], flag_name: str) -> tuple[float, ...]:
-    """Accepts an inclusive 'MIN:MAX' range, a single value, or a comma-separated list of
-    discrete values -- always resolved against ``grid`` (this run's actual alpha/gamma grid),
-    never interpolated."""
-    if ":" in spec:
-        low_text, high_text = spec.split(":", 1)
-        low, high = float(low_text), float(high_text)
-        selected = tuple(value for value in grid if low - 1e-9 <= value <= high + 1e-9)
-    else:
-        requested = [float(token) for token in spec.split(",") if token.strip()]
-        missing = [req for req in requested if not any(abs(value - req) < 1e-9 for value in grid)]
-        if missing:
-            raise ValueError(f"--{flag_name}={spec} requests values not in the fixed grid {grid}: {missing}")
-        selected = tuple(value for value in grid if any(abs(value - req) < 1e-9 for req in requested))
-    if not selected:
-        raise ValueError(f"--{flag_name}={spec} selects no values from the fixed grid {grid}")
-    return selected
-
-
-def script_dir() -> Path:
-    return Path(__file__).resolve().parent
+def stats_comparison(saved_rows, mine_rows):
+    """Align exact sample/channel coverage before comparing selected finite fields."""
+    def index(rows):
+        result = {}
+        for row in rows:
+            key = (row["base_index"], row["channel"])
+            if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in key) or key in result:
+                raise ValueError(f"Duplicate/invalid sample-channel index: {key}")
+            if any(not math.isfinite(float(value)) for name, value in row.items() if name not in ("base_index", "channel")):
+                raise ValueError(f"Non-finite statistics at {key}")
+            if any(k not in row for k in STATS_KEYS_FOR_NUMERIC_CHECK):
+                raise ValueError(f"Missing comparison fields at {key}")
+            result[key] = row
+        return result
+    result = {"fields": list(STATS_KEYS_FOR_NUMERIC_CHECK), "tolerance": NUMERIC_HASH_TOLERANCE,
+              "error_definition": "max abs(reconstructed-saved)/max(abs(saved),1e-6)",
+              "saved_rows": len(saved_rows), "reconstructed_rows": len(mine_rows), "compared_rows": 0}
+    if not saved_rows or not mine_rows:
+        return {**result, "status": "unavailable", "reason": "empty statistics", "max_relative_error": None}
+    try:
+        saved, mine = index(saved_rows), index(mine_rows)
+        if saved.keys() != mine.keys():
+            return {**result, "status": "failed", "reason": "sample/channel coverage mismatch",
+                    "missing": sorted(mine.keys() - saved.keys()), "extra": sorted(saved.keys() - mine.keys()),
+                    "max_relative_error": None}
+        error = max(abs(float(mine[k][f]) - float(saved[k][f])) / max(abs(float(saved[k][f])), 1e-6)
+                    for k in mine for f in STATS_KEYS_FOR_NUMERIC_CHECK)
+        return {**result, "status": "passed" if error <= NUMERIC_HASH_TOLERANCE else "failed",
+                "compared_rows": len(mine), "max_relative_error": error}
+    except (KeyError, TypeError, ValueError) as exc:
+        return {**result, "status": "failed", "reason": str(exc), "max_relative_error": None}
 
 
-def find_run_dir(run_id: str) -> Path:
-    run_dir = script_dir() / "outputs" / run_id
-    if not run_dir.is_dir():
-        raise FileNotFoundError(f"No such run directory: {run_dir}")
-    return run_dir
+def stats_relative_error(saved_rows, mine_rows):
+    result = stats_comparison(saved_rows, mine_rows)
+    if result["max_relative_error"] is None:
+        raise ValueError(result.get("reason", "Invalid statistics"))
+    return result["max_relative_error"]
 
 
-def _run_resolved_config(run_dir: Path) -> dict[str, Any]:
-    manifest_path = run_dir / "run_manifest.json"
-    if not manifest_path.exists():
-        raise RuntimeError(f"Missing run manifest, cannot recover the run configuration: {manifest_path}")
-    return read_json(manifest_path)["resolved_config"]
-
-
-def normalization_profile_for(run_dir: Path) -> str:
-    return _run_resolved_config(run_dir)["experiment"]["normalization_profile"]
-
-
-def load_condition_grids(run_dir: Path) -> tuple[list[float], list[float], list[float]]:
-    """Reads this run's actual alpha/gamma grids from its manifest instead of assuming the
-    standard 0.1-step sweep -- a 'finer' config (see configs/sdxl_turbo_full_finer.yaml) can use
-    an entirely different, non-uniform alpha/gamma grid for the proposed methods only."""
-    config = _run_resolved_config(run_dir)
-    baseline_alphas = sorted(round(v, 6) for v in config["baseline"]["alpha_values"])
-    proposed_alphas = sorted({round(v, 6) for family in FAMILIES_CONFIG_KEYS for v in config[family]["alpha_values"]})
-    proposed_gammas = sorted({round(v, 6) for family in FAMILIES_CONFIG_KEYS for v in config[family]["gamma_values"]})
-    return baseline_alphas, proposed_alphas, proposed_gammas
-
-
-def _defaults_or_full(preferred: tuple[float, ...], grid: list[float]) -> tuple[float, ...]:
-    """Uses the curated ``preferred`` selection where at least two of its values exist in this
-    run's actual grid (the common case: the standard 0.1-step sweep). Otherwise -- e.g. a finer
-    grid sharing at most one point with ``preferred`` -- shows the run's full (small) grid rather
-    than a near-empty, effectively arbitrary selection."""
-    filtered = tuple(v for v in preferred if v in grid)
-    return filtered if len(filtered) >= 2 else tuple(sorted(grid))
-
-
-def discover_blocks(run_dir: Path) -> list[str]:
-    cache_root = run_dir / "noise_cache"
-    if not cache_root.is_dir():
-        raise RuntimeError(f"No noise cache found: {cache_root}")
-    blocks = [p.name for p in sorted(cache_root.iterdir())
-              if (p / "base_white.pt").exists() and (p / "independent_eta.pt").exists() and (p / "noise_metadata.json").exists()]
-    if not blocks:
-        raise RuntimeError(f"No usable cache blocks under {cache_root}")
-    return blocks
-
-
-def load_block_batch(run_dir: Path, block_id: str) -> tuple[NoiseBatch, bool]:
-    cache_dir = run_dir / "noise_cache" / block_id
-    base = torch.load(cache_dir / "base_white.pt", map_location="cpu", weights_only=True).to(torch.float32)
-    eta = torch.load(cache_dir / "independent_eta.pt", map_location="cpu", weights_only=True).to(torch.float32)
-    metadata = read_json(cache_dir / "noise_metadata.json")
-    batch = NoiseBatch(base, eta, metadata["sample_seeds"], metadata["eta_sample_seeds"], metadata["base_hashes"], metadata["eta_hashes"])
-    integrity_ok = ([tensor_hash(x) for x in base] == batch.base_hashes) and ([tensor_hash(x) for x in eta] == batch.eta_hashes)
-    return batch, integrity_ok
-
-
-def find_model_dir(run_dir: Path) -> Path | None:
-    gen_root = run_dir / "generations"
-    if not gen_root.is_dir():
-        return None
-    candidates = [p for p in gen_root.iterdir() if p.is_dir()]
-    if len(candidates) > 1:
-        raise RuntimeError(f"Ambiguous model directory under {gen_root}: {[p.name for p in candidates]} "
-                            "-- pass a run with a single generation model, or extend this script to disambiguate")
-    return candidates[0] if candidates else None
-
-
-def load_final_hashes(model_dir: Path | None, block_id: str, condition: ConditionSpec) -> dict[int, str] | None:
-    if model_dir is None:
-        return None
-    samples_path = model_dir / block_id / condition.identifier / "samples.jsonl"
-    if not samples_path.exists():
-        return None
-    rows = read_jsonl(samples_path)
-    if not rows:
-        return None
-    return {int(row["base_index"]): row["final_noise_hash"] for row in rows}
-
-
-def load_saved_post_norm_stats(model_dir: Path | None, block_id: str, condition: ConditionSpec) -> list[dict[str, float]] | None:
-    if model_dir is None:
-        return None
-    stats_path = model_dir / block_id / condition.identifier / "noise_statistics.json"
-    if not stats_path.exists():
-        return None
-    return read_json(stats_path)["post_normalization"]
-
-
-def stats_relative_error(saved_rows: list[dict[str, float]], mine_rows: list[dict[str, float]]) -> float:
-    """Max relative error on scale-sensitive stats; excludes mean/psd_dc, which are ~0 after
-    normalization and make relative error meaningless (dividing near-zero by near-zero)."""
-    worst = 0.0
-    for saved, mine in zip(saved_rows, mine_rows):
-        for key in STATS_KEYS_FOR_NUMERIC_CHECK:
-            worst = max(worst, abs(saved[key] - mine[key]) / max(abs(saved[key]), 1e-6))
-    return worst
-
-
-# --------------------------------------------------------------------------- #
-# Frequency-domain helpers
-# --------------------------------------------------------------------------- #
-
-def radial_bin_layout(height: int, width: int, num_bins: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    r = radial_frequency_grid(height, width)
-    r_max = float(r.max())
-    edges = torch.linspace(0.0, r_max + 1e-6, num_bins + 1)
-    bin_index_flat = torch.bucketize(r.reshape(-1), edges[1:-1], right=False)
-    counts = torch.zeros(num_bins, dtype=torch.float64).index_add_(0, bin_index_flat, torch.ones_like(bin_index_flat, dtype=torch.float64))
-    return r, bin_index_flat, counts
-
-
-def radial_shell_mean(power: torch.Tensor, bin_index_flat: torch.Tensor, counts: torch.Tensor, num_bins: int) -> torch.Tensor:
-    """Mean power within each radial shell; power's last two dims are (H, Wf)."""
-    flat = power.reshape(*power.shape[:-2], -1).to(torch.float64)
-    out = torch.zeros(*power.shape[:-2], num_bins, dtype=torch.float64)
-    out.index_add_(-1, bin_index_flat, flat)
-    return out / counts.clamp(min=1.0)
-
-
-def theoretical_shell_curve(family: str, alpha: float, gamma: float, r: torch.Tensor, bin_index_flat: torch.Tensor,
-                             counts: torch.Tensor, num_bins: int) -> torch.Tensor:
-    """Theoretical expected (unnormalized) PSD shape, binned identically to the empirical curves. Valid for
-    baseline/same_phase, whose closed-form multiplier applies deterministically to base_white's own spectrum
-    (no independent random component involved). Independent-white mixes in an independently-drawn eta, so its
-    theoretical curve is instead built from the real pink/eta component spectra -- see
-    ``independent_white_theoretical_shell`` below."""
-    h_squared = (1.0 + r).pow(-2.0 * alpha).to(torch.float64)
-    theoretical = h_squared if family == "baseline" else (1.0 - gamma) * h_squared + gamma
-    return radial_shell_mean(theoretical.unsqueeze(0).unsqueeze(0), bin_index_flat, counts, num_bins)[0, 0]
-
-
-def independent_white_theoretical_shell(acc: "Accumulator", gamma: float) -> torch.Tensor:
-    """Expected pre-final-normalization PSD from the actual Design B components.
-
-    The pink component has already received the configured per-sample normalization,
-    while eta remains the cached unit-Gaussian draw. Consequently this is deliberately
-    derived from the observed component spectra rather than the old closed form
-    ``(1-gamma)*H^2+gamma``.
-    """
-    n = max(acc.sample_count, 1)
-    return ((1.0 - gamma) * (acc.pink_component_shell_power_sum / n)
-            + gamma * (acc.eta_component_shell_power_sum / n))
-
-
-def normalize_log_curve(shell_mean: torch.Tensor) -> torch.Tensor:
-    normalized = shell_mean / shell_mean.sum().clamp(min=EPS)
-    return torch.log(normalized.clamp(min=EPS))
-
-
-def frequency_column_weights(width: int, width_freq: int) -> torch.Tensor:
-    """rfft2's half-spectrum omits the conjugate-mirror columns for 0 < fx < W/2; weight the DC and
-    (even-width) Nyquist columns by 1 and every other column by 2 so column sums approximate the true
-    full-spectrum energy instead of over-crediting the DC/Nyquist edge relative to the doubled interior."""
-    weights = torch.full((width_freq,), 2.0, dtype=torch.float64)
-    weights[0] = 1.0
+def frequency_column_weights(width, width_freq=None):
+    weights = torch.full((width // 2 + 1,), 2., dtype=torch.float64)
+    weights[0] = 1
     if width % 2 == 0:
-        weights[-1] = 1.0
+        weights[-1] = 1
     return weights
 
 
-def band_energy_fractions(power: torch.Tensor, r: torch.Tensor, column_weights: torch.Tensor
-                           ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    r_max = float(r.max())
-    flat_r = r.reshape(-1)
-    weighted = (power.to(torch.float64) * column_weights.view(1, -1)).reshape(*power.shape[:-2], -1)
-    total = weighted.sum(dim=-1).clamp(min=EPS)
-    low_mask, mid_mask = flat_r <= r_max / 3.0, (flat_r > r_max / 3.0) & (flat_r <= 2.0 * r_max / 3.0)
-    high_mask = flat_r > 2.0 * r_max / 3.0
-    return (weighted[..., low_mask].sum(dim=-1) / total, weighted[..., mid_mask].sum(dim=-1) / total,
-            weighted[..., high_mask].sum(dim=-1) / total)
+class SpectrumLayout:
+    def __init__(self, height, width, bins=NUM_RADIAL_BINS):
+        if bins < 1:
+            raise ValueError("radial bins must be positive")
+        self.height, self.width, self.bins = height, width, bins
+        self.r = radial_frequency_grid(height, width).double()
+        self.edges = torch.linspace(0, float(self.r.max()) + 1e-6, bins + 1, dtype=torch.float64)
+        self.index = torch.bucketize(self.r.flatten(), self.edges[1:-1], right=False)
+        self.weights = frequency_column_weights(width).expand_as(self.r).clone()
+        # Report full-spectrum non-DC shells; DC is explicitly reported separately.
+        self.weights[0, 0] = 0
+        self.counts = torch.zeros(bins, dtype=torch.float64).index_add_(0, self.index, self.weights.flatten())
+        self.valid = self.counts > 0
+
+    def shell(self, power, *, energy=False):
+        flat = (power.double() * self.weights).flatten(-2)
+        out = torch.zeros((*flat.shape[:-1], self.bins), dtype=torch.float64)
+        out.index_add_(-1, self.index, flat)
+        return out if energy else out / self.counts.clamp_min(1)
+
+    def settings(self):
+        return {"fft": "torch.fft.rfft2", "fft_norm": "backward (unnormalized forward)",
+                "power": "abs(F)^2; sum(full_power)/(H*W) equals spatial sum of squares",
+                "height": self.height, "width": self.width, "radial_bins": self.bins,
+                "radial_edges_fft_bin_units": self.edges.tolist(),
+                "bin_boundary": "first [0,e1], then (ei,e(i+1)]", "dc": "excluded from shells/bands/coherence, reported separately",
+                "empty_bins": "CSV null; excluded from normalization, distances and plots",
+                "rfft_weights": "1 for fx=0/even-width Nyquist, 2 otherwise (DC weight set to zero)",
+                "shell_mean": "weighted power sum / full-spectrum coefficient count",
+                "shell_energy": "weighted power sum (divide by H*W for spatial energy)",
+                "normalized_log_psd": "ln(max(shell_mean/sum(nonempty shell_means),1e-12)); shell-equal normalization",
+                "distance": "mean squared difference of normalized log-PSD over nonempty shells",
+                "coherence": "sum_f w_f |sum_sample,channel Fz conj(Fbase)|^2 / sum_f w_f (sum |Fz|^2)(sum |Fbase|^2)",
+                "coherence_weight": "full-spectrum multiplicity times product of pooled powers; ensemble magnitude-squared coherence, not phase proof",
+                "aggregation_unit": "sample/channel, equally weighted; no prompt bootstrap",
+                "bands": "non-DC radius <=rmax/3, (rmax/3,2*rmax/3], >2*rmax/3; mean per-sample/channel energy fraction"}
 
 
-def cosine_similarity(z: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    zf, rf = z.reshape(*z.shape[:2], -1).to(torch.float64), ref.reshape(*ref.shape[:2], -1).to(torch.float64)
-    return (zf * rf).sum(dim=-1) / (zf.norm(dim=-1) * rf.norm(dim=-1)).clamp(min=EPS)
+def normalize_log_curve(curve, valid=None):
+    valid = (torch.isfinite(curve) & (curve > 0)) if valid is None else valid
+    if not bool(valid.any()) or not bool(torch.isfinite(curve[valid]).all()) or float(curve[valid].sum()) <= 0:
+        raise ValueError("No finite positive spectral energy")
+    result = torch.full_like(curve, float("nan"))
+    result[valid] = torch.log((curve[valid] / curve[valid].sum()).clamp_min(EPS))
+    return result
 
 
-def same_phase_exact_ratio_error(raw: torch.Tensor, base_white: torch.Tensor, alpha: float, gamma: float, r: torch.Tensor) -> float:
-    """Same-phase preserves Fourier phase, so |z_hat|^2/|eps_hat|^2 must equal G(r)^2 pointwise -- an exact,
-    per-sample check that needs no ensemble averaging (unlike independent-white's random cross term). Takes the
-    actual reconstructed ``raw`` from ``construct_raw_noise`` (not a locally recomputed ``same_phase_floor``) so
-    this check also catches a wrong family/gamma/normalization dispatch inside the shared constructor."""
-    eps_hat = torch.fft.rfft2(base_white, dim=(-2, -1))
-    z_hat = torch.fft.rfft2(raw, dim=(-2, -1))
-    mask = eps_hat.abs() > 1e-4
-    if not bool(mask.any()):
-        return 0.0
-    ratio = z_hat[mask].abs().square().to(torch.float64) / eps_hat[mask].abs().square().to(torch.float64)
-    theoretical = ((1.0 - gamma) * (1.0 + r).pow(-2.0 * alpha) + gamma).to(torch.float64)
-    theoretical = theoretical.unsqueeze(0).unsqueeze(0).expand_as(eps_hat.abs())[mask]
-    return float((ratio - theoretical).abs().max())
+def coefficient_check(actual, expected, *, component_scale=None, absolute_error_bound=0.):
+    """Mixed float32 tolerance; avoid relative-error singularities at cancellation.
+
+    For complex coefficients, use an absolute roundoff floor of eight float32
+    epsilons times per-sample/channel RMS Fourier amplitude. For the power
+    identity, relative tolerance uses the pre-cancellation component magnitude.
+    These are numerical algebra checks, not bit-exact tensor checks.
+    """
+    actual = actual.to(torch.complex128) if actual.is_complex() else actual.double()
+    expected = expected.to(torch.complex128) if expected.is_complex() else expected.double()
+    delta = (actual - expected).abs()
+    scale = expected.abs() if component_scale is None else component_scale.double()
+    floor = (8 * torch.finfo(torch.float32).eps * scale.square().mean((-1, -2), keepdim=True).sqrt()
+             if component_scale is None else 0.)
+    allowance = EXACT_ATOL + floor + EXACT_RTOL * scale + absolute_error_bound
+    return {"status": "passed" if bool((delta <= allowance).all()) else "failed",
+            "max_scaled_error": float((delta / allowance).max()), "max_absolute_error": float(delta.max()),
+            "tolerance_scale": "pre-cancellation component power plus propagated complex roundoff bound" if component_scale is not None else "expected amplitude plus 8*float32_eps*per-sample/channel RMS amplitude floor"}
 
 
-# --------------------------------------------------------------------------- #
-# Per-condition accumulation across blocks
-# --------------------------------------------------------------------------- #
+def construction_checks(raw_fft, base_fft, eta_fft, condition, pink_fft=None):
+    gamma = condition.gamma
+    if condition.family in ("baseline", "same_phase"):
+        if pink_fft is None:
+            raise ValueError("Supply the actual H×W filter; width cannot be inferred from rFFT shape")
+        h = pink_fft
+        multiplier = h if condition.family == "baseline" else ((1 - gamma) * h.square() + gamma).sqrt()
+        expected = base_fft * multiplier
+        check = coefficient_check(raw_fft, expected)
+        mask = expected.abs() > max(EXACT_ATOL * 10, float(expected.abs().max()) * 1e-6)
+        check["phase_bins_checked"] = int(mask.sum())
+        check["near_zero_bins_excluded_from_phase"] = int(mask.numel() - mask.sum())
+        check["max_phase_error_radians"] = float(torch.angle(raw_fft[mask] * expected[mask].conj()).abs().max()) if bool(mask.any()) else None
+        return check, expected.abs().square(), torch.zeros_like(raw_fft.real)
+    pink_fft, eta_fft = pink_fft.to(torch.complex128), eta_fft.to(torch.complex128)
+    expected = (1 - gamma) ** .5 * pink_fft + gamma ** .5 * eta_fft
+    prediction = (1 - gamma) * pink_fft.abs().square() + gamma * eta_fft.abs().square()
+    cross = 2 * (gamma * (1 - gamma)) ** .5 * (pink_fft * eta_fft.conj()).real
+    check = coefficient_check(raw_fft, expected)
+    amplitude_tolerance = (EXACT_ATOL + EXACT_RTOL * expected.abs() +
+                           8 * torch.finfo(torch.float32).eps * expected.abs().square().mean((-1, -2), keepdim=True).sqrt())
+    # Propagate the complex-coefficient error bound through |F|^2:
+    # ||F+dF|^2-|F|^2| <= 2|F| |dF| + |dF|^2.
+    power_bound = 2 * expected.abs() * amplitude_tolerance + amplitude_tolerance.square()
+    power_check = coefficient_check(raw_fft.to(torch.complex128).abs().square(), prediction + cross,
+                                    component_scale=prediction + cross.abs(), absolute_error_bound=power_bound)
+    check["power_identity"] = power_check
+    if power_check["status"] == "failed":
+        check["status"] = "failed"
+    return check, prediction, cross
 
-@dataclass
+
+def cache_inventory(run, blocks):
+    root = run / "noise_cache"
+    actual = {p.name for p in root.iterdir()} if root.is_dir() else set()
+    expected = set(blocks)
+    incomplete = {b: [name for name in ("base_white.pt", "independent_eta.pt", "noise_metadata.json")
+                      if not (root / b / name).is_file()] for b in expected & actual}
+    incomplete = {b: names for b, names in incomplete.items() if names}
+    return {"expected_blocks": sorted(expected), "missing_blocks": sorted(expected - actual),
+            "extra_blocks": sorted(actual - expected), "incomplete_blocks": incomplete,
+            "candidate_blocks": sorted(expected & actual - set(incomplete))}
+
+
+def load_block_batch(run, block_id, contract):
+    root = run / "noise_cache" / block_id
+    metadata = read_json(root / "noise_metadata.json")
+    base = torch.load(root / "base_white.pt", map_location="cpu", weights_only=True)
+    eta = torch.load(root / "independent_eta.pt", map_location="cpu", weights_only=True)
+    if not isinstance(base, torch.Tensor) or not isinstance(eta, torch.Tensor):
+        raise RuntimeError(f"Cache {block_id}: expected tensors")
+    if base.ndim != 4 or base.shape != eta.shape or base.shape[0] != len(contract.base_indices) or min(base.shape) < 1:
+        raise RuntimeError(f"Cache {block_id}: invalid base/eta shape")
+    if base.dtype != torch.float32 or eta.dtype != torch.float32 or not bool(torch.isfinite(base).all() and torch.isfinite(eta).all()):
+        raise RuntimeError(f"Cache {block_id}: non-finite values or unexpected dtype")
+    block = contract.blocks[block_id]
+    if metadata.get("block_id") != block_id or metadata.get("shape") != list(base.shape) or metadata.get("batch_seed") != block.get("batch_seed"):
+        raise RuntimeError(f"Cache {block_id}: metadata shape/identity mismatch")
+    for name in ("sample_seeds", "eta_sample_seeds", "base_hashes", "eta_hashes"):
+        if not isinstance(metadata.get(name), list) or len(metadata[name]) != base.shape[0]:
+            raise RuntimeError(f"Cache {block_id}: incomplete {name}")
+    if any(type(seed) is not int for name in ("sample_seeds", "eta_sample_seeds") for seed in metadata[name]):
+        raise RuntimeError(f"Cache {block_id}: invalid seed metadata")
+    if "batch_seed" in block and metadata["sample_seeds"] != [int(block["batch_seed"]) + i for i in contract.base_indices]:
+        raise RuntimeError(f"Cache {block_id}: sample seed/index mismatch")
+    master = contract.config["experiment"].get("master_seed")
+    if master is not None and metadata["eta_sample_seeds"] != [derived_seed(int(master), block_id, "independent_eta", i) for i in contract.base_indices]:
+        raise RuntimeError(f"Cache {block_id}: eta seed/index mismatch")
+    if [tensor_hash(x) for x in base] != metadata["base_hashes"] or [tensor_hash(x) for x in eta] != metadata["eta_hashes"]:
+        raise RuntimeError(f"Cache {block_id}: raw cache hash mismatch; formal validation stopped")
+    return NoiseBatch(base, eta, metadata["sample_seeds"], metadata["eta_sample_seeds"], metadata["base_hashes"], metadata["eta_hashes"])
+
+
+def generation_evidence(run, block_id, condition, final, batch, contract):
+    paths = list((run / "generations").glob(f"*/{block_id}/{condition.identifier}/samples.jsonl"))
+    evidence = {"hash_status": "unavailable", "sample_index_status": "unavailable", "sample_count": final.shape[0],
+                "hash_checked_samples": 0, "hash_matched_samples": 0, "stats_status": "unavailable", "confirmed_recorded_tensor": False, "source_hashes": {}}
+    if len(paths) > 1:
+        return {**evidence, "sample_index_status": "failed", "reason": "ambiguous model records"}
+    if not paths:
+        evidence["reason"] = "samples.jsonl missing"
+        return evidence
+    path = paths[0]
+    evidence["source_hashes"][str(path.relative_to(run))] = file_hash(path)
+    rows = read_jsonl(path)
+    try:
+        indices = [r["base_index"] for r in rows]
+        if any(type(i) is not int for i in indices) or sorted(indices) != list(contract.base_indices):
+            raise ValueError(f"missing/duplicate/extra sample indices: {indices}")
+        block = contract.blocks[block_id]
+        for row in rows:
+            validate_condition_metadata(row, context=str(path))
+            if row["condition_id"] != condition.identifier or row.get("block_id") != block_id or any(row.get(k) != block[k] for k in ("prompt_id", "prompt")):
+                raise ValueError("sample identity mismatch")
+            i = row["base_index"]
+            for key, expected in (("base_noise_hash", batch.base_hashes[i]), ("eta_noise_hash", batch.eta_hashes[i]),
+                                  ("normalization_profile", contract.config["experiment"]["normalization_profile"]),
+                                  ("sample_seed", batch.sample_seeds[i])):
+                if key in row and row[key] != expected:
+                    raise ValueError(f"generation record {key} mismatch")
+        evidence["sample_index_status"] = "passed"
+        for row in rows:
+            if row.get("final_noise_hash"):
+                evidence["hash_checked_samples"] += 1
+                evidence["hash_matched_samples"] += int(row["final_noise_hash"] == tensor_hash(final[row["base_index"]]))
+        checked, matched = evidence["hash_checked_samples"], evidence["hash_matched_samples"]
+        evidence["hash_status"] = "failed" if matched < checked else "passed" if checked == len(indices) else "partial" if checked else "unavailable"
+    except (ValueError, KeyError, RuntimeError, TypeError) as exc:
+        evidence.update(sample_index_status="failed", reason=str(exc))
+    stats_path = path.parent / "noise_statistics.json"
+    if stats_path.is_file():
+        evidence["source_hashes"][str(stats_path.relative_to(run))] = file_hash(stats_path)
+        comparison = stats_comparison(read_json(stats_path).get("post_normalization", []), noise_statistics(final))
+        evidence["stats_comparison"] = comparison
+        evidence["stats_status"] = comparison["status"]
+    if evidence["hash_status"] == "failed" and evidence["stats_status"] == "passed":
+        evidence["interpretation"] = "汇总统计一致，但无法据此确认张量逐元素一致；跨环境数值差异是可能原因之一。"
+    evidence["confirmed_recorded_tensor"] = evidence["hash_status"] == "passed" and evidence["sample_index_status"] == "passed"
+    return evidence
+
+
 class Accumulator:
-    shell_power_sum: torch.Tensor
-    raw_shell_power_sum: torch.Tensor
-    pink_component_shell_power_sum: torch.Tensor
-    eta_component_shell_power_sum: torch.Tensor
-    sample_count: int = 0
-    mean_sum: float = 0.0
-    std_sum: float = 0.0
-    l2_sum: float = 0.0
-    low_sum: float = 0.0
-    mid_sum: float = 0.0
-    high_sum: float = 0.0
-    cosine_sum: float = 0.0
-    cross_sum: torch.Tensor | None = None
-    sxx_sum: torch.Tensor | None = None
-    syy_sum: torch.Tensor | None = None
-    hash_checked: int = 0
-    hash_matched: int = 0
-    numeric_checked: int = 0
-    numeric_matched: int = 0
-    same_phase_exact_ok: bool = True
-    same_phase_max_error: float = 0.0
-    block_ids: list[str] = field(default_factory=list)
+    """Only condition-level sums persist; no cached blocks or sample tensors retained."""
+    def __init__(self, layout):
+        self.layout = layout
+        self.n = 0
+        self.curves = {k: torch.zeros(layout.bins, dtype=torch.float64) for k in ("raw", "final", "prediction_without_cross", "cross", "identity_prediction", "empirical_minus_prediction", "identity_residual")}
+        self.cross = torch.zeros_like(layout.r, dtype=torch.complex128)
+        self.xx = torch.zeros_like(layout.r); self.yy = torch.zeros_like(layout.r)
+        self.scalar = {k: 0. for k in ("mean", "std", "l2_norm", "cosine_to_base", "low_frac", "mid_frac", "high_frac", "raw_dc_power", "final_dc_power")}
+
+    def add(self, raw_fft, final, final_fft, reference, reference_fft, prediction, cross):
+        layout = self.layout
+        n = final.shape[0] * final.shape[1]
+        power = final_fft.abs().square()
+        for key, value in (("raw", raw_fft.abs().square()), ("final", power), ("prediction_without_cross", prediction),
+                           ("cross", cross), ("identity_prediction", prediction + cross),
+                           ("empirical_minus_prediction", raw_fft.abs().square() - prediction),
+                           ("identity_residual", raw_fft.abs().square() - prediction - cross)):
+            self.curves[key] += layout.shell(value).sum((0, 1))
+        self.cross += (final_fft.to(torch.complex128) * reference_fft.to(torch.complex128).conj()).sum((0, 1))
+        self.xx += power.double().sum((0, 1)); self.yy += reference_fft.abs().square().double().sum((0, 1))
+        flat, ref = final.double().flatten(-2), reference.double().flatten(-2)
+        for key, value in (("mean", flat.mean(-1)), ("std", flat.std(-1, unbiased=False)),
+                           ("l2_norm", flat.norm(dim=-1)), ("cosine_to_base", (flat * ref).sum(-1) / (flat.norm(dim=-1) * ref.norm(dim=-1)).clamp_min(EPS)),
+                           ("raw_dc_power", raw_fft[..., 0, 0].abs().square()), ("final_dc_power", power[..., 0, 0])):
+            self.scalar[key] += float(value.double().sum())
+        weighted = power.double() * layout.weights
+        total = weighted.sum((-1, -2)).clamp_min(EPS)
+        r, top = layout.r, float(layout.r.max())
+        for key, mask in (("low_frac", r <= top/3), ("mid_frac", (r > top/3) & (r <= 2*top/3)), ("high_frac", r > 2*top/3)):
+            self.scalar[key] += float((weighted[..., mask].sum(-1) / total).sum())
+        self.n += n
+
+    def summary(self):
+        if not self.n:
+            raise ValueError("Empty accumulation")
+        denom = float((self.layout.weights * self.xx * self.yy).sum())
+        return {**{k: v / self.n for k, v in self.scalar.items()}, "sample_channel_count": self.n,
+                "coherence_to_base": float((self.layout.weights * self.cross.abs().square()).sum()) / denom if denom > 0 else None}
 
 
-def new_accumulator(num_bins: int, height: int, width_freq: int) -> Accumulator:
-    return Accumulator(shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        raw_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        pink_component_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        eta_component_shell_power_sum=torch.zeros(num_bins, dtype=torch.float64),
-                        cross_sum=torch.zeros(height, width_freq, dtype=torch.complex128),
-                        sxx_sum=torch.zeros(height, width_freq, dtype=torch.float64),
-                        syy_sum=torch.zeros(height, width_freq, dtype=torch.float64))
+def combined_status(statuses):
+    if "failed" in statuses:
+        return "failed"
+    if not statuses or all(s == "unavailable" for s in statuses):
+        return "unavailable"
+    return "passed" if all(s == "passed" for s in statuses) else "partial"
 
 
-def accumulate_block(acc: Accumulator, block_id: str, final: torch.Tensor, base_reference: torch.Tensor, r: torch.Tensor,
-                      bin_index_flat: torch.Tensor, counts: torch.Tensor, num_bins: int, column_weights: torch.Tensor) -> None:
-    """Accumulates real spectral/statistical analysis for the actual model-input tensor (``final``, i.e.
-    post-normalization). ``base_reference`` must be normalized the same way (``normalize(base_white, profile)``),
-    not the raw cached draw -- otherwise cosine/coherence pick up a spurious offset from comparing a zero-mean
-    unit-std tensor against a reference with a different mean/std, which is largest exactly where it matters most:
-    the alpha=0 same-phase sanity check, where final IS base_reference and should read cosine/coherence == 1 exactly."""
-    b, c = final.shape[0], final.shape[1]
-    n = b * c
-    z_hat = torch.fft.rfft2(final, dim=(-2, -1))
-    e_hat = torch.fft.rfft2(base_reference, dim=(-2, -1))
-    power = z_hat.abs().square()
-    acc.shell_power_sum += radial_shell_mean(power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
-    low, mid, high = band_energy_fractions(power, r, column_weights)
-    acc.low_sum += float(low.sum()); acc.mid_sum += float(mid.sum()); acc.high_sum += float(high.sum())
-    flat = final.reshape(b, c, -1).to(torch.float64)
-    acc.mean_sum += float(flat.mean(dim=-1).sum())
-    acc.std_sum += float(flat.std(dim=-1, unbiased=False).sum())
-    acc.l2_sum += float(torch.linalg.vector_norm(flat, dim=-1).sum())
-    acc.cosine_sum += float(cosine_similarity(final, base_reference).sum())
-    acc.cross_sum += (z_hat * e_hat.conj()).sum(dim=(0, 1)).to(torch.complex128)
-    acc.sxx_sum += power.sum(dim=(0, 1)).to(torch.float64)
-    acc.syy_sum += e_hat.abs().square().sum(dim=(0, 1)).to(torch.float64)
-    acc.sample_count += n
-    acc.block_ids.append(block_id)
-
-
-def accumulate_raw_shell_power(acc: Accumulator, raw: torch.Tensor, bin_index_flat: torch.Tensor,
-                                counts: torch.Tensor, num_bins: int) -> None:
-    """Tracks the pre-normalization PSD separately from the final-noise PSD above, so the theoretical-formula
-    check (which is derived pre-normalization) never gets compared against post-normalization statistics."""
-    power = torch.fft.rfft2(raw, dim=(-2, -1)).abs().square()
-    acc.raw_shell_power_sum += radial_shell_mean(power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
-
-
-def accumulate_raw_component_shell_power(acc: Accumulator, pink_component: torch.Tensor, eta: torch.Tensor,
-                                          bin_index_flat: torch.Tensor, counts: torch.Tensor, num_bins: int) -> None:
-    """Track the normalized-pink and raw-eta component PSDs actually mixed by Design B."""
-    pink_power = torch.fft.rfft2(pink_component, dim=(-2, -1)).abs().square()
-    eta_power = torch.fft.rfft2(eta, dim=(-2, -1)).abs().square()
-    acc.pink_component_shell_power_sum += radial_shell_mean(pink_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
-    acc.eta_component_shell_power_sum += radial_shell_mean(eta_power, bin_index_flat, counts, num_bins).sum(dim=(0, 1))
-
-
-def summarize(acc: Accumulator) -> dict[str, float]:
-    n = max(acc.sample_count, 1)
-    # Magnitude-squared coherence per frequency bin, |<Sxy>|^2 / (<Sxx><Syy>), bounded in [0, 1]
-    # by Cauchy-Schwarz; averaged across bins weighted by their combined power so near-zero-power
-    # bins (e.g. DC after zero-mean normalization) don't dominate with unstable 0/0 ratios.
-    denom = (acc.sxx_sum * acc.syy_sum).clamp(min=EPS)
-    coherence = float(acc.cross_sum.abs().square().sum() / denom.sum()) if float(acc.syy_sum.sum()) > 0 else 0.0
-    return {"mean": acc.mean_sum / n, "std": acc.std_sum / n, "l2_norm": acc.l2_sum / n,
-            "low_frac": acc.low_sum / n, "mid_frac": acc.mid_sum / n, "high_frac": acc.high_sum / n,
-            "cosine_to_base": acc.cosine_sum / n, "coherence_to_base": coherence}
-
-
-# --------------------------------------------------------------------------- #
-# Main per-run validation
-# --------------------------------------------------------------------------- #
-
-def run_validation(run_id: str, alpha_spec: str | None = None, gamma_spec: str | None = None) -> dict[str, Any]:
-    run_dir = find_run_dir(run_id)
-    profile = normalization_profile_for(run_dir)
-    blocks = discover_blocks(run_dir)
-    model_dir = find_model_dir(run_dir)
-    baseline_alphas, proposed_alphas, proposed_gammas = load_condition_grids(run_dir)
-    conditions = full_condition_grid(baseline_alphas, proposed_alphas, proposed_gammas)
-
-    alphas = (_parse_value_spec(alpha_spec, proposed_alphas, "alphas") if alpha_spec is not None
-              else _defaults_or_full(DEFAULT_SELECTED_ALPHAS, proposed_alphas))
-    gammas = (_parse_value_spec(gamma_spec, proposed_gammas, "gammas") if gamma_spec is not None
-              else _defaults_or_full(DEFAULT_SELECTED_GAMMAS, proposed_gammas))
-
-    batches: dict[str, NoiseBatch] = {}
-    integrity_ok = True
-    for block_id in blocks:
-        batch, ok = load_block_batch(run_dir, block_id)
-        batches[block_id] = batch
-        integrity_ok = integrity_ok and ok
-    shapes = {tuple(batch.base_white.shape) for batch in batches.values()}
-    if len(shapes) != 1:
-        raise RuntimeError(f"Cache blocks disagree on tensor shape: {shapes}")
-    _, _, height, width = next(iter(shapes))
-    width_freq = width // 2 + 1
-    r, bin_index_flat, counts = radial_bin_layout(height, width, NUM_RADIAL_BINS)
-    column_weights = frequency_column_weights(width, width_freq)
-
-    accumulators: dict[ConditionSpec, Accumulator] = {c: new_accumulator(NUM_RADIAL_BINS, height, width_freq) for c in conditions}
-    per_block_rows: list[dict[str, Any]] = []
-    hash_totals = {"checked": 0, "matched": 0, "conditions_with_hashes": 0,
-                   "numeric_checked": 0, "numeric_matched": 0}
-    same_phase_condition_error: dict[ConditionSpec, float] = {}
-
-    for block_id in blocks:
-        batch = batches[block_id]
-        # Same normalization as ``final`` below, applied to the reference draw: this makes cosine/coherence
-        # compare like-for-like (both zero-mean unit-std) instead of picking up a spurious gap from comparing
-        # a normalized tensor against a differently-scaled raw one -- most visibly at the alpha=0 same-phase
-        # endpoint, where final IS base_reference and cosine/coherence should read exactly 1.
-        base_reference = normalize(batch.base_white, profile)
-        for condition in conditions:
-            gamma = None if condition.family == "baseline" else condition.gamma
-            # ``raw`` (pre-final-normalization) is used only to validate the intervention formula itself
-            # (theoretical PSD / same-phase exactness); every statistic below analyzes ``final``, the
-            # tensor actually fed to the model, since normalization is affine and materially changes
-            # absolute-scale stats (mean/std/l2_norm) even though shape-based ratios are nearly invariant.
-            raw = construct_raw_noise(batch, condition.family, condition.alpha, gamma, profile)
-            final = normalize(raw, profile)
-            acc = accumulators[condition]
-            accumulate_block(acc, block_id, final, base_reference, r, bin_index_flat, counts, NUM_RADIAL_BINS, column_weights)
-            accumulate_raw_shell_power(acc, raw, bin_index_flat, counts, NUM_RADIAL_BINS)
-            if condition.family == "independent_white":
-                pink_component = (pink(batch.base_white, condition.alpha) if gamma == 0.0
-                                  else normalize(pink(batch.base_white, condition.alpha), profile))
-                accumulate_raw_component_shell_power(acc, pink_component, batch.independent_eta,
-                                                      bin_index_flat, counts, NUM_RADIAL_BINS)
-
-            hash_matched = hash_checked = 0
-            numeric_matched = 0
-            final_hashes = load_final_hashes(model_dir, block_id, condition)
-            if final_hashes is not None:
-                for index, expected in final_hashes.items():
-                    hash_checked += 1
-                    if tensor_hash(final[index]) == expected:
-                        hash_matched += 1
-                acc.hash_checked += hash_checked
-                acc.hash_matched += hash_matched
-                hash_totals["checked"] += hash_checked
-                hash_totals["matched"] += hash_matched
-                hash_totals["conditions_with_hashes"] += 1
-
-                saved_stats = load_saved_post_norm_stats(model_dir, block_id, condition)
-                if saved_stats is not None:
-                    numeric_matched = int(stats_relative_error(saved_stats, noise_statistics(final)) < NUMERIC_HASH_TOLERANCE)
-                    acc.numeric_checked += 1
-                    acc.numeric_matched += numeric_matched
-                    hash_totals["numeric_checked"] += 1
-                    hash_totals["numeric_matched"] += numeric_matched
-
-            same_phase_error = None
-            if condition.family == "same_phase" and condition.gamma is not None:
-                same_phase_error = same_phase_exact_ratio_error(raw, batch.base_white, condition.alpha, condition.gamma, r)
-                acc.same_phase_max_error = max(acc.same_phase_max_error, same_phase_error)
-                acc.same_phase_exact_ok = acc.same_phase_exact_ok and same_phase_error < SAME_PHASE_EXACT_TOLERANCE
-                same_phase_condition_error[condition] = acc.same_phase_max_error
-
-            b, c = final.shape[0], final.shape[1]
-            power = torch.fft.rfft2(final, dim=(-2, -1)).abs().square()
-            low, mid, high = band_energy_fractions(power, r, column_weights)
-            flat = final.reshape(b, c, -1).to(torch.float64)
-            per_block_rows.append({
-                "run_id": run_id, "block_id": block_id, "family": condition.family, "alpha": condition.alpha,
-                "gamma": condition.gamma_for_theory if condition.family != "baseline" else "", "region": condition.region,
-                "mean": float(flat.mean(dim=-1).mean()), "std": float(flat.std(dim=-1, unbiased=False).mean()),
-                "l2_norm": float(torch.linalg.vector_norm(flat, dim=-1).mean()),
-                "low_frac": float(low.mean()), "mid_frac": float(mid.mean()), "high_frac": float(high.mean()),
-                "cosine_to_base": float(cosine_similarity(final, base_reference).mean()),
-                "same_phase_exact_max_error": same_phase_error if same_phase_error is not None else "",
-                "hash_available": final_hashes is not None,
-                "hash_matched": hash_matched, "hash_checked": hash_checked,
-                "numeric_matched": numeric_matched,
-            })
-
-    aggregate_rows, equivalent_alpha_map, coherence_map, psd_error_map = _aggregate_conditions(
-        conditions, accumulators, run_id, r, bin_index_flat, counts)
-
-    csv_rows = per_block_rows + aggregate_rows
-    out_dir = run_dir / "analysis" / "frequency_validation"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(out_dir / "noise_frequency_summary.csv", csv_rows)
-
-    r_max = float(r.max())
-    curves = _condition_shell_curves(conditions, accumulators)
-    _plot_radial_psd_selected(out_dir / "radial_psd_selected.png", curves, run_id, r_max, alphas, gammas)
-    _plot_theoretical_vs_empirical(out_dir / "theoretical_vs_empirical_psd.png", conditions, accumulators, r,
-                                    bin_index_flat, counts, run_id, r_max, alphas, gammas)
-    _plot_equivalent_alpha_heatmap(out_dir / "equivalent_alpha_heatmap.png", equivalent_alpha_map, run_id,
-                                    list(alphas), list(gammas), baseline_alphas)
-    _plot_coherence_heatmap(out_dir / "coherence_heatmap.png", coherence_map, run_id, list(alphas), list(gammas))
-
-    return {
-        "run_id": run_id, "run_dir": run_dir, "num_blocks": len(blocks), "num_conditions": len(conditions),
-        "cache_integrity_ok": integrity_ok, "hash_totals": hash_totals, "out_dir": out_dir,
-        "psd_error_map": psd_error_map,
-    }
-
-
-def _aggregate_conditions(conditions: list[ConditionSpec], accumulators: dict[ConditionSpec, Accumulator], run_id: str,
-                           r: torch.Tensor, bin_index_flat: torch.Tensor, counts: torch.Tensor
-                           ) -> tuple[list[dict[str, Any]], dict[tuple[str, float, float], float],
-                                      dict[tuple[str, float, float], float], dict[ConditionSpec, float]]:
-    baseline_curves = {c.alpha: normalize_log_curve(accumulators[c].shell_power_sum / max(accumulators[c].sample_count, 1))
-                       for c in conditions if c.family == "baseline"}
-    rows: list[dict[str, Any]] = []
-    equivalent_alpha_map: dict[tuple[str, float, float], float] = {}
-    coherence_map: dict[tuple[str, float, float], float] = {}
-    psd_error_map: dict[ConditionSpec, float] = {}
-
-    for condition in conditions:
-        acc = accumulators[condition]
-        summary = summarize(acc)
-        # equivalent_alpha compares like-for-like: the actual model-input (final) PSD shape against the
-        # final-based baseline sweep above.
-        empirical_curve = normalize_log_curve(acc.shell_power_sum / max(acc.sample_count, 1))
-        # psd_log_error validates the intervention *formula*, so both sides must stay pre-final-normalization: the
-        # raw empirical PSD against the raw theoretical prediction (closed-form, or -- for independent-white --
-        # derived from the real pink/eta components).
-        raw_empirical_curve = normalize_log_curve(acc.raw_shell_power_sum / max(acc.sample_count, 1))
-        if condition.family == "independent_white":
-            theoretical_shell = independent_white_theoretical_shell(acc, condition.gamma_for_theory)
-        else:
-            theoretical_shell = theoretical_shell_curve(condition.family, condition.alpha, condition.gamma_for_theory, r,
-                                                         bin_index_flat, counts, NUM_RADIAL_BINS)
-        theoretical_curve = normalize_log_curve(theoretical_shell)
-        valid = counts > 0
-        psd_log_error = float((raw_empirical_curve[valid] - theoretical_curve[valid]).abs().mean())
-        psd_error_map[condition] = psd_log_error
-
-        equivalent_alpha = None
-        if condition.family != "baseline":
-            distances = {alpha: float(((empirical_curve[valid] - curve[valid]) ** 2).sum())
-                         for alpha, curve in baseline_curves.items()}
-            equivalent_alpha = min(distances, key=distances.get)
-            equivalent_alpha_map[(condition.family, condition.alpha, condition.gamma_for_theory)] = equivalent_alpha
-        coherence_map[(condition.family, condition.alpha, condition.gamma_for_theory)] = summary["coherence_to_base"]
-
-        rows.append({
-            "run_id": run_id, "block_id": "ALL_BLOCKS", "family": condition.family, "alpha": condition.alpha,
-            "gamma": condition.gamma_for_theory if condition.family != "baseline" else "", "region": condition.region,
-            "mean": summary["mean"], "std": summary["std"], "l2_norm": summary["l2_norm"],
-            "low_frac": summary["low_frac"], "mid_frac": summary["mid_frac"], "high_frac": summary["high_frac"],
-            "cosine_to_base": summary["cosine_to_base"], "coherence_to_base": summary["coherence_to_base"],
-            "psd_log_error": psd_log_error, "psd_shape_match": psd_log_error < PSD_SHAPE_TOLERANCE,
-            "equivalent_alpha": equivalent_alpha if equivalent_alpha is not None else "",
-            "same_phase_exact_match": acc.same_phase_exact_ok if condition.family == "same_phase" else "",
-            "same_phase_exact_max_error": acc.same_phase_max_error if condition.family == "same_phase" else "",
-            "hash_available": acc.hash_checked > 0,
-            "hash_matched": acc.hash_matched, "hash_checked": acc.hash_checked,
-            "numeric_matched": acc.numeric_matched, "numeric_checked": acc.numeric_checked,
-        })
-    return rows, equivalent_alpha_map, coherence_map, psd_error_map
-
-
-def _condition_shell_curves(conditions: list[ConditionSpec], accumulators: dict[ConditionSpec, Accumulator]
-                             ) -> dict[ConditionSpec, torch.Tensor]:
-    return {c: normalize_log_curve(accumulators[c].shell_power_sum / max(accumulators[c].sample_count, 1)) for c in conditions}
-
-
-def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fields = sorted({key for row in rows for key in row})
+def _write_csv(path, rows):
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.DictWriter(handle, fieldnames=sorted({key for row in rows for key in row}))
+        writer.writeheader(); writer.writerows(rows)
 
 
-# --------------------------------------------------------------------------- #
-# Plots
-# --------------------------------------------------------------------------- #
+def run_validation(run_id=None, alpha_spec=None, gamma_spec=None, same_phase_gamma_spec=None,
+                   independent_gamma_spec=None, *, run_dir=None, options=None, allow_partial=False, num_bins=NUM_RADIAL_BINS):
+    run = resolve_run(run_id, run_dir)
+    output = new_output(run, "frequency_validation")
+    summary = {"validation_code_version": VALIDATION_VERSION, "output_format_version": 3,
+               "plot_style": "original noise_validation.py",
+               "plot_label_aliases": {"equivalent baseline alpha": "nearest_baseline_alpha on the discrete run grid"},
+               "legacy_region_caption": "retained original title text; does not establish preregistration or a configured region", "run_dir": str(run),
+               "code_hashes": {name: file_hash(Path(__file__).parent / name) for name in
+                               ("noise_validation.py", "noise_methods.py", "run_support.py", "result_integrity.py")},
+               "out_dir": str(output), "status": "unavailable", "allow_partial": allow_partial,
+               "source_hashes": {name: file_hash(run / name) for name in ("run_manifest.json", "blocks.jsonl") if (run / name).exists()},
+               "checks": {}, "thresholds": {"complex_and_power_identity_rtol": EXACT_RTOL, "atol": EXACT_ATOL,
+                                             "complex_roundoff_floor": "8*float32_eps*per-sample/channel RMS Fourier amplitude",
+                                             "power_identity_rtol_scale": "component prediction + abs(actual cross term), computed in float64",
+                                             "power_absolute_bound": "atol + 2*abs(expected_F)*complex_tolerance + complex_tolerance^2 (propagated Fourier roundoff)",
+                                             "saved_statistics_relative_tolerance": NUMERIC_HASH_TOLERANCE,
+                                             "psd_shape_pass_threshold": None}}
+    try:
+        contract = load_run_contract(run)
+        config = contract.config
+        summary["resolved_config"] = config
+        summary["source_run_manifest"] = read_json(run / "run_manifest.json")
+        experiment = config["experiment"]
+        summary["noise_construction_version"] = experiment.get("noise_construction_version")
+        if experiment.get("noise_construction_version") != NOISE_CONSTRUCTION_VERSION or experiment.get("noise_frequency_grid") != NOISE_FREQUENCY_GRID_VERSION:
+            summary["checks"]["construction_version"] = {"status": "unavailable", "reason": "unsupported noise construction/frequency version"}
+            raise RuntimeError("Unsupported frozen noise construction/frequency version; refusing to guess old Design B")
+        summary["checks"]["construction_version"] = {"status": "passed"}
+        profile = experiment["normalization_profile"]
+        grid = conditions(config)
+        options = dict(options or {})
+        for key, value in (("plot_alpha_range", alpha_spec), ("plot_gamma_range", gamma_spec),
+                           ("plot_same_gamma_range", same_phase_gamma_spec), ("plot_independent_gamma_range", independent_gamma_spec)):
+            if value is not None:
+                options.setdefault(key, value)
+        selection = display_selection(config, options)
+        summary["display_selection"] = selection
+        inventory = cache_inventory(run, contract.blocks)
+        summary["coverage"] = {**inventory, "actual_blocks": [], "coverage_fraction": 0., "omissions": {}}
+        coverage = summary["coverage"]
+        coverage["omissions"] = {**{b: "missing cache directory" for b in inventory["missing_blocks"]},
+                                  **{b: "missing " + ", ".join(v) for b, v in inventory["incomplete_blocks"].items()}}
+        incomplete = bool(inventory["missing_blocks"] or inventory["extra_blocks"] or inventory["incomplete_blocks"])
+        summary["checks"]["cache_coverage"] = {"status": "partial" if incomplete and allow_partial else "failed" if incomplete else "passed"}
+        if incomplete and not allow_partial:
+            raise RuntimeError(f"Cache coverage failed: missing={inventory['missing_blocks']}, extra={inventory['extra_blocks']}, incomplete={inventory['incomplete_blocks']}")
+        if not inventory["candidate_blocks"]:
+            raise RuntimeError("No complete expected cache blocks to validate")
+        expected_paths = {(bid, c.identifier) for bid in contract.blocks for c in grid}
+        extras = []
+        for path in (run / "generations").glob("*/**/samples.jsonl"):
+            parts = path.relative_to(run / "generations").parts
+            if len(parts) != 5 or (parts[1], "/".join(parts[2:4])) not in expected_paths:
+                extras.append(str(path.relative_to(run)))
+        summary["checks"]["unexpected_generation_records"] = {"status": "failed" if extras else "passed", "paths": extras}
+        accumulators, records, shape = {}, [], None
+        summary["block_condition_evidence"] = records
+        for bid in inventory["candidate_blocks"]:
+            # Corruption is fatal even in partial mode. Partial permits only absent files/blocks.
+            batch = load_block_batch(run, bid, contract)
+            for name in ("base_white.pt", "independent_eta.pt", "noise_metadata.json"):
+                path = run / "noise_cache" / bid / name
+                summary["source_hashes"][str(path.relative_to(run))] = file_hash(path)
+            if shape is None:
+                shape = tuple(batch.base_white.shape)
+                layout = SpectrumLayout(*shape[-2:], num_bins)
+                summary["spectral_settings"] = layout.settings()
+                accumulators = {c: Accumulator(layout) for c in grid}
+            elif tuple(batch.base_white.shape) != shape:
+                raise RuntimeError(f"Cache {bid}: shape differs across blocks")
+            base_fft = torch.fft.rfft2(batch.base_white, norm="backward")
+            eta_fft = torch.fft.rfft2(batch.independent_eta, norm="backward")
+            reference = normalize(batch.base_white, profile)
+            reference_fft = torch.fft.rfft2(reference, norm="backward")
+            # Reuse normalized pink FFT for every gamma of an alpha in this block.
+            pink_components = {}
+            for c in grid:
+                raw = construct_raw_noise(batch, c.family, c.alpha, c.gamma, profile)
+                final = normalize(raw, profile)
+                raw_fft, final_fft = torch.fft.rfft2(raw, norm="backward"), torch.fft.rfft2(final, norm="backward")
+                if c.family == "independent_white":
+                    key = (c.alpha, c.gamma == 0)
+                    if key not in pink_components:
+                        component = pink(batch.base_white, c.alpha)
+                        if c.gamma != 0:
+                            component = normalize(component, profile)
+                        pink_components[key] = torch.fft.rfft2(component, norm="backward")
+                    component_fft = pink_components[key]
+                else:
+                    component_fft = pink_filter(shape[-2], shape[-1], c.alpha)
+                exact, prediction, cross = construction_checks(raw_fft, base_fft, eta_fft, c, component_fft)
+                accumulators[c].add(raw_fft, final, final_fft, reference, reference_fft, prediction, cross)
+                evidence = generation_evidence(run, bid, c, final, batch, contract)
+                summary["source_hashes"].update(evidence.pop("source_hashes"))
+                records.append({"block_id": bid, "condition_id": c.identifier, "exact_construction": exact, **evidence})
+                del raw, final, raw_fft, final_fft, prediction, cross, component_fft
+            coverage["actual_blocks"].append(bid)
+            coverage["coverage_fraction"] = len(coverage["actual_blocks"]) / len(contract.blocks)
+            del batch, base_fft, eta_fft, reference, reference_fft, pink_components
+        summary["checks"]["raw_cache_integrity"] = {"status": "passed"}
+        summary["checks"]["cache_reconstruction"] = {"status": "partial" if incomplete else "passed"}
+        for name, key in (("final_noise_bit_exact", "hash_status"), ("saved_summary_statistics", "stats_status"), ("sample_index_coverage", "sample_index_status")):
+            summary["checks"][name] = {"status": combined_status([r[key] for r in records])}
+        summary["checks"]["recorded_generation_tensor"] = {"status": combined_status([
+            "passed" if r["confirmed_recorded_tensor"] else "failed" if r["sample_index_status"] == "failed" or r["hash_status"] == "failed" else "unavailable"
+            for r in records])}
+        summary["checks"]["exact_construction"] = {"status": combined_status([r["exact_construction"]["status"] for r in records])}
+        summary["counts"] = {"unique_conditions": len(grid), "validated_blocks": len(coverage["actual_blocks"]),
+                             "block_conditions": len(records), "samples": len(records) * shape[0],
+                             "sample_channels": len(records) * shape[0] * shape[1],
+                             "hash_checked_samples": sum(r["hash_checked_samples"] for r in records),
+                             "hash_matched_samples": sum(r["hash_matched_samples"] for r in records),
+                             "block_conditions_with_hashes": sum(r["hash_checked_samples"] > 0 for r in records),
+                             "unique_conditions_with_hashes": len({r["condition_id"] for r in records if r["hash_checked_samples"]})}
+        summary["block_condition_evidence"] = records
+        aggregate, spectral_rows = aggregate_conditions(accumulators)
+        summary["checks"]["nearest_baseline_alpha"] = {"status": "passed" if any(c.family == "baseline" for c in grid) and any(c.family != "baseline" for c in grid) else "unavailable", "meaning": "Nearest discrete baseline grid point by normalized log-PSD distance; not distribution/generation equivalence or continuous optimum"}
+        summary["checks"]["finite_sample_psd"] = {"status": "passed", "meaning": "diagnostics computed, no empirical-shape correctness threshold"}
+        _write_csv(output / "noise_frequency_summary.csv", aggregate)
+        _write_csv(output / "radial_psd.csv", spectral_rows)
+        failed = any(v["status"] == "failed" for v in summary["checks"].values())
+        evidence_incomplete = any(summary["checks"][name]["status"] in ("unavailable", "partial")
+                                  for name in ("final_noise_bit_exact", "saved_summary_statistics", "sample_index_coverage"))
+        summary["status"] = "failed" if failed else "partial" if incomplete or evidence_incomplete else "passed"
+        summary["status_scope"] = "execution/integrity and evidence completeness; see separate checks for tensor identity and diagnostic applicability"
+        plot_diagnostics(output, accumulators, aggregate, selection, partial=incomplete)
+        return summary
+    except Exception as exc:
+        summary["status"] = "failed"
+        summary["error"] = str(exc)
+        if "raw_cache_integrity" not in summary["checks"]:
+            summary["checks"]["raw_cache_integrity"] = {"status": "failed" if "Cache " in str(exc) else "unavailable"}
+        raise RuntimeError(f"{exc}; failed validation summary: {output / 'validation_summary.json'}") from exc
+    finally:
+        write_json(output / "validation_summary.json", summary)
+
+
+def aggregate_conditions(accumulators):
+    if not accumulators:
+        return [], []
+    layout = next(iter(accumulators.values())).layout
+    baseline = {c.alpha: normalize_log_curve(a.curves["final"] / a.n, layout.valid) for c, a in accumulators.items() if c.family == "baseline"}
+    baseline_grid = sorted(baseline)
+    rows, spectra = [], []
+    for c, acc in accumulators.items():
+        curves = {k: v / acc.n for k, v in acc.curves.items()}
+        final_log = normalize_log_curve(curves["final"], layout.valid)
+        raw_log = normalize_log_curve(curves["raw"], layout.valid)
+        prediction_log = normalize_log_curve(curves["prediction_without_cross"], layout.valid)
+        distances = {a: float((final_log[layout.valid] - log[layout.valid]).square().mean()) for a, log in baseline.items()}
+        nearest = min(distances, key=lambda a: (distances[a], a)) if distances and c.family != "baseline" else None
+        meta = {"condition_id": c.identifier, "family": c.family, "alpha": c.alpha, "gamma": c.gamma}
+        rows.append({**meta, **acc.summary(), "nearest_baseline_alpha": nearest,
+                     "nearest_baseline_status": "passed" if nearest is not None else "unavailable",
+                     "nearest_baseline_distance": distances[nearest] if nearest is not None else None,
+                     "nearest_baseline_at_boundary": nearest in (baseline_grid[0], baseline_grid[-1]) if nearest is not None else None,
+                     "baseline_search_grid": str(baseline_grid), "distance_definition": "nonempty-shell mean squared normalized log-PSD difference",
+                     "raw_prediction_log_psd_mse_diagnostic": float((raw_log[layout.valid] - prediction_log[layout.valid]).square().mean()),
+                     "cross_shell_energy_l1_fraction_diagnostic": float((curves["cross"].abs() * layout.counts).sum() / (curves["raw"] * layout.counts).sum().clamp_min(EPS))})
+        for i in range(layout.bins):
+            valid = bool(layout.valid[i])
+            spectra.append({**meta, "bin": i, "left": float(layout.edges[i]), "right": float(layout.edges[i+1]),
+                            "full_spectrum_count": float(layout.counts[i]),
+                            **{k + "_shell_mean_psd": float(v[i]) if valid else None for k, v in curves.items()},
+                            **{k + "_shell_energy": float(v[i] * layout.counts[i]) if valid else None for k, v in curves.items()}})
+    return rows, spectra
+
+
+def plot_diagnostics(output, accumulators, rows, selection, *, partial=False):
+    from types import SimpleNamespace
+    if not accumulators:
+        return
+    selected = [c for c in accumulators if selected_condition(c, selection)]
+    if not selected:
+        return
+    layout = next(iter(accumulators.values())).layout
+    alphas = {family: tuple(grid["alpha_values"]) for family, grid in selection.items()}
+    gammas = {family: tuple(grid.get("gamma_values", ())) for family, grid in selection.items()}
+    curves = {c: normalize_log_curve(accumulators[c].curves["final"] / accumulators[c].n, layout.valid) for c in selected}
+    views = {c: SimpleNamespace(raw_shell_power_sum=accumulators[c].curves["raw"],
+                               sample_count=accumulators[c].n,
+                               prediction_shell=accumulators[c].curves["prediction_without_cross"] / accumulators[c].n)
+             for c in selected}
+    baseline = sorted(c.alpha for c in accumulators if c.family == "baseline")
+    ids = {c.identifier for c in selected}
+    nearest = {(row["family"], row["alpha"], row["gamma"]): row["nearest_baseline_alpha"] for row in rows
+               if row["condition_id"] in ids and row["nearest_baseline_alpha"] is not None}
+    coherence = {(row["family"], row["alpha"], row["gamma"]): row["coherence_to_base"] for row in rows
+                 if row["condition_id"] in ids and row["coherence_to_base"] is not None}
+    _plot_radial_psd_selected(output / "radial_psd_selected.png", curves, float(layout.r.max()), alphas, gammas, partial=partial)
+    _plot_theoretical_vs_empirical(output / "theoretical_vs_empirical_psd.png", selected, views, layout.r,
+                                  layout.index, layout.counts, float(layout.r.max()), alphas, gammas, partial=partial)
+    _plot_equivalent_alpha_heatmap(output / "equivalent_alpha_heatmap.png", nearest, alphas, gammas, baseline, partial=partial)
+    _plot_coherence_heatmap(output / "coherence_heatmap.png", coherence, alphas, gammas, partial=partial)
+
+
+LINESTYLE_CYCLE = ("solid", (0, (4, 1.5)), (0, (1, 1)), (0, (3, 1, 1, 1)), (0, (5, 1, 1, 1, 1, 1)), (0, (1, 1, 3, 1)))
+
+
+def _linestyle_for(index):
+    return LINESTYLE_CYCLE[index % len(LINESTYLE_CYCLE)]
+
+
+def _format_grid_value(value):
+    return f"{value:.4f}".rstrip("0").rstrip(".")
 
 def _shell_centers(num_bins: int, r_max: float) -> np.ndarray:
     edges = np.linspace(0.0, r_max + 1e-6, num_bins + 1)
     return 0.5 * (edges[:-1] + edges[1:])
 
 
-def _save_figure(figure, target: Path) -> None:
+def _save_figure(figure, target: Path, *, partial=False) -> None:
+    if partial and figure._suptitle is not None:
+        figure._suptitle.set_text("PARTIAL — " + figure._suptitle.get_text())
     target.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(target, dpi=220, bbox_inches="tight")
     import matplotlib.pyplot as plt
     plt.close(figure)
 
 
-def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Tensor], run_id: str, r_max: float,
-                               alphas: tuple[float, ...], gammas: tuple[float, ...]) -> None:
+def _plot_radial_psd_selected(target: Path, curves: dict[ConditionSpec, torch.Tensor], r_max: float,
+                               alphas: tuple[float, ...],
+                               gammas: dict[str, tuple[float, ...]], *, partial=False) -> None:
     import matplotlib.pyplot as plt
     conditions = list(curves)
     num_bins = len(next(iter(curves.values())))
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True, sharey=True)
+    families = [f for f in FAMILIES if any(c.family == f for c in conditions)] or ["baseline"]
+    figure, axes = plt.subplots(1, len(families), figsize=(12 if len(families) == 2 else 6, 4.8), sharex=True, sharey=True, squeeze=False)
+    axes = axes[0]
     cmap = plt.colormaps["viridis"]
     x = _shell_centers(num_bins, r_max)
-    for axis, family in zip(axes, FAMILIES):
+    for axis, family in zip(axes, families):
+        family_gammas = gammas.get(family, ())
+        family_alphas = alphas.get(family, ()) if isinstance(alphas, dict) else alphas
         baseline_conditions = sorted([c for c in conditions if c.family == "baseline"], key=lambda c: c.alpha)
         for index, bc in enumerate(baseline_conditions):
             axis.plot(x, curves[bc].numpy(), color="0.75", linewidth=0.8, zorder=1,
                       label="baseline (all α)" if index == 0 else None)
         # Only the two extreme baseline curves (alpha=0 and alpha=max) are labelled directly on the
         # plot -- the intermediate ones are visually ordered between them and don't need their own tag.
-        for bc in (baseline_conditions[0], baseline_conditions[-1]):
+        for bc in dict.fromkeys((baseline_conditions[0], baseline_conditions[-1])) if baseline_conditions else ():
             axis.annotate(f"α={_format_grid_value(bc.alpha)}", xy=(x[-1], curves[bc].numpy()[-1]),
                           xytext=(4, 0), textcoords="offset points", va="center", fontsize=6.5, color="0.4",
                           annotation_clip=False)
-        for alpha in alphas:
-            for gamma_index, gamma in enumerate(gammas):
+        for alpha in family_alphas:
+            for gamma_index, gamma in enumerate(family_gammas):
                 match = next((c for c in conditions if c.family == family and c.alpha == alpha and c.gamma == gamma), None)
                 if match is None:
                     continue
-                color = cmap(0.1 + 0.8 * alphas.index(alpha) / max(len(alphas) - 1, 1))
+                color = cmap(0.1 + 0.8 * family_alphas.index(alpha) / max(len(family_alphas) - 1, 1))
                 axis.plot(x, curves[match].numpy(), color=color, linestyle=_linestyle_for(gamma_index), linewidth=1.6,
                           label=f"α={_format_grid_value(alpha)}, γ={_format_grid_value(gamma)}", zorder=2)
-        axis.set(xlabel="Radial frequency r (FFT-bin units)", ylabel="log normalized PSD" if family == FAMILIES[0] else "",
-                 title="Same-phase" if family == "same_phase" else "Independent-white")
+        axis.set(xlabel="Radial frequency r (FFT-bin units)", ylabel="log normalized PSD" if axis is axes[0] else "",
+                 title={"same_phase": "Same-phase", "independent_white": "Independent-white", "baseline": "Baseline"}[family])
         axis.grid(alpha=0.2)
         axis.margins(x=0.14)
         axis.legend(fontsize=6, ncol=2, frameon=False)
-    figure.suptitle(f"Representative radial PSD curves ({run_id}); grey lines are the baseline alpha sweep")
-    _save_figure(figure, target)
+    figure.suptitle("Representative radial PSD curves; grey lines are the baseline alpha sweep")
+    _save_figure(figure, target, partial=partial)
 
 
 def _plot_theoretical_vs_empirical(target: Path, conditions: list[ConditionSpec], accumulators: dict[ConditionSpec, Accumulator],
-                                    r: torch.Tensor, bin_index_flat: torch.Tensor, counts: torch.Tensor, run_id: str,
-                                    r_max: float, alphas: tuple[float, ...], gammas: tuple[float, ...]) -> None:
+                                    r: torch.Tensor, bin_index_flat: torch.Tensor, counts: torch.Tensor,
+                                    r_max: float, alphas: tuple[float, ...],
+                                    gammas: dict[str, tuple[float, ...]], *, partial=False) -> None:
     # Overlays every requested alpha x gamma pair in one figure per family: color encodes alpha,
     # linestyle (LINESTYLE_CYCLE) encodes gamma, and empirical vs theoretical is distinguished by
     # weight/opacity only (empirical = full weight, theoretical = thinner and faded) so linestyle
@@ -675,35 +610,35 @@ def _plot_theoretical_vs_empirical(target: Path, conditions: list[ConditionSpec]
     # theoretical curves reuse each empirical curve's own color, so a single generic swatch could
     # never represent them; that distinction is spelled out in the suptitle instead.
     import matplotlib.pyplot as plt
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True, sharey=True)
+    families = [f for f in FAMILIES if any(c.family == f for c in conditions)] or ["baseline"]
+    figure, axes = plt.subplots(1, len(families), figsize=(12 if len(families) == 2 else 6, 4.8), sharex=True, sharey=True, squeeze=False)
+    axes = axes[0]
     cmap = plt.colormaps["plasma"]
-    x = _shell_centers(NUM_RADIAL_BINS, r_max)
-    for axis, family in zip(axes, FAMILIES):
-        for alpha_index, alpha in enumerate(alphas):
-            color = cmap(0.1 + 0.8 * alpha_index / max(len(alphas) - 1, 1))
-            for gamma_index, gamma in enumerate(gammas):
+    x = _shell_centers(len(next(iter(accumulators.values())).raw_shell_power_sum), r_max)
+    for axis, family in zip(axes, families):
+        family_gammas = (None,) if family == "baseline" else gammas.get(family, ())
+        family_alphas = alphas.get(family, ()) if isinstance(alphas, dict) else alphas
+        for alpha_index, alpha in enumerate(family_alphas):
+            color = cmap(0.1 + 0.8 * alpha_index / max(len(family_alphas) - 1, 1))
+            for gamma_index, gamma in enumerate(family_gammas):
                 match = next((c for c in conditions if c.family == family and c.alpha == alpha and c.gamma == gamma), None)
                 if match is None:
                     continue
                 acc = accumulators[match]
                 empirical = normalize_log_curve(acc.raw_shell_power_sum / max(acc.sample_count, 1)).numpy()
-                if family == "independent_white":
-                    theoretical_shell = independent_white_theoretical_shell(acc, gamma)
-                else:
-                    theoretical_shell = theoretical_shell_curve(family, alpha, gamma, r, bin_index_flat,
-                                                                 counts, NUM_RADIAL_BINS)
+                theoretical_shell = acc.prediction_shell
                 theoretical = normalize_log_curve(theoretical_shell).numpy()
                 linestyle = _linestyle_for(gamma_index)
                 axis.plot(x, empirical, color=color, linestyle=linestyle, linewidth=1.6, alpha=1.0,
-                          label=f"α={_format_grid_value(alpha)}, γ={_format_grid_value(gamma)}")
+                          label=f"α={_format_grid_value(alpha)}" + (f", γ={_format_grid_value(gamma)}" if gamma is not None else ""))
                 axis.plot(x, theoretical, color=color, linestyle=linestyle, linewidth=0.9, alpha=0.45)
-        axis.set(xlabel="Radial frequency r (FFT-bin units)", ylabel="log normalized PSD" if family == FAMILIES[0] else "",
-                 title="Same-phase" if family == "same_phase" else "Independent-white")
+        axis.set(xlabel="Radial frequency r (FFT-bin units)", ylabel="log normalized PSD" if axis is axes[0] else "",
+                 title={"same_phase": "Same-phase", "independent_white": "Independent-white", "baseline": "Baseline"}[family])
         axis.grid(alpha=0.2)
         axis.legend(fontsize=6, ncol=2, frameon=False)
-    figure.suptitle(f"Theoretical vs empirical PSD shape, pre-final-normalization ({run_id}); "
-                     f"color=α, linestyle=γ, solid full-weight=empirical, faded thin=theory")
-    _save_figure(figure, target)
+    figure.suptitle("Theoretical vs empirical PSD shape, pre-final-normalization; "
+                     "color=α, linestyle=γ, solid full-weight=empirical, faded thin=theory")
+    _save_figure(figure, target, partial=partial)
 
 
 def _grid_matrix(mapping: dict[tuple[str, float, float], float], family: str,
@@ -711,18 +646,17 @@ def _grid_matrix(mapping: dict[tuple[str, float, float], float], family: str,
     return np.array([[mapping.get((family, alpha, gamma), np.nan) for gamma in gammas] for alpha in alphas])
 
 
-def _draw_primary_region_box(axis, alphas: list[float], gammas: list[float]) -> None:
-    # The pre-registered primary region (alpha 0.3-0.7, gamma<=0.6) is only meaningful when this
-    # run's grid actually spans it -- a restricted grid (e.g. a finer alpha 0.6-0.9 sweep) may not
-    # contain these reference points at all, so skip the box rather than raise or mis-draw it.
-    if PRIMARY_ALPHA_MIN not in alphas or PRIMARY_ALPHA_MAX not in alphas or PRIMARY_GAMMA_MAX not in gammas:
+def _draw_primary_region_box(axis, alphas, gammas):
+    # A legacy display region is drawn only if it is explicitly frozen in config.
+    region = getattr(axis, "_saved_primary_region", None)
+    if not region:
         return
     from matplotlib.patches import Rectangle
-    alpha_lo = alphas.index(PRIMARY_ALPHA_MIN) - 0.5
-    alpha_hi = alphas.index(PRIMARY_ALPHA_MAX) + 0.5
-    gamma_hi = gammas.index(PRIMARY_GAMMA_MAX) + 0.5
-    axis.add_patch(Rectangle((-0.5, alpha_lo), gamma_hi + 0.5, alpha_hi - alpha_lo,
-                              fill=False, edgecolor="white", linewidth=1.8, zorder=5))
+    if not all(value in alphas for value in region["alpha_range"]) or region["gamma_max"] not in gammas:
+        return
+    lo, hi = (alphas.index(value) for value in region["alpha_range"])
+    axis.add_patch(Rectangle((-.5, lo-.5), gammas.index(region["gamma_max"])+1, hi-lo+1,
+                             fill=False, edgecolor="white", linewidth=1.8, zorder=5))
 
 
 def _heatmap_panel(axis, matrix: np.ndarray, title: str, cmap: str, vmin: float | None, vmax: float | None,
@@ -735,69 +669,71 @@ def _heatmap_panel(axis, matrix: np.ndarray, title: str, cmap: str, vmin: float 
     return image
 
 
-def _plot_equivalent_alpha_heatmap(target: Path, mapping: dict[tuple[str, float, float], float], run_id: str,
-                                    alphas: list[float], gammas: list[float], baseline_alphas: list[float]) -> None:
+def _plot_equivalent_alpha_heatmap(target: Path, mapping: dict[tuple[str, float, float], float],
+                                    alphas: dict[str, list[float]], gammas: dict[str, list[float]],
+                                    baseline_alphas: list[float], *, partial=False) -> None:
     import matplotlib.pyplot as plt
-    figure, axes = plt.subplots(1, 2, figsize=(12, 5))
-    for axis, family in zip(axes, FAMILIES):
-        matrix = _grid_matrix(mapping, family, alphas, gammas)
+    families = [f for f in FAMILIES if alphas.get(f) and gammas.get(f)] or ["baseline"]
+    figure, axes = plt.subplots(1, len(families), figsize=(12 if len(families) == 2 else 6, 5), squeeze=False)
+    axes = axes[0]
+    for axis, family in zip(axes, families):
+        family_alphas, family_gammas = alphas.get(family, []), gammas.get(family, [])
+        if not family_alphas or not family_gammas or not mapping:
+            axis.text(.5, .5, "Unavailable", transform=axis.transAxes, ha="center")
+            axis.set_axis_off()
+            continue
+        matrix = _grid_matrix(mapping, family, family_alphas, family_gammas)
         image = _heatmap_panel(axis, matrix, "Same-phase" if family == "same_phase" else "Independent-white",
-                                "viridis", min(baseline_alphas), max(baseline_alphas), alphas, gammas)
+                                "viridis", min(baseline_alphas), max(baseline_alphas),
+                                family_alphas, family_gammas)
         figure.colorbar(image, ax=axis, label="equivalent baseline α", shrink=0.85)
-    figure.suptitle(f"Equivalent baseline α by closest normalized log-PSD ({run_id}); white box = primary region")
-    _save_figure(figure, target)
+    figure.suptitle("Equivalent baseline α by closest normalized log-PSD; white box = primary region")
+    _save_figure(figure, target, partial=partial)
 
 
-def _plot_coherence_heatmap(target: Path, mapping: dict[tuple[str, float, float], float], run_id: str,
-                             alphas: list[float], gammas: list[float]) -> None:
+def _plot_coherence_heatmap(target: Path, mapping: dict[tuple[str, float, float], float],
+                             alphas: dict[str, list[float]], gammas: dict[str, list[float]], *, partial=False) -> None:
     import matplotlib.pyplot as plt
-    figure, axes = plt.subplots(1, 2, figsize=(12, 5))
-    for axis, family in zip(axes, FAMILIES):
-        matrix = _grid_matrix(mapping, family, alphas, gammas)
+    families = [f for f in FAMILIES if alphas.get(f) and gammas.get(f)] or ["baseline"]
+    figure, axes = plt.subplots(1, len(families), figsize=(12 if len(families) == 2 else 6, 5), squeeze=False)
+    axes = axes[0]
+    for axis, family in zip(axes, families):
+        family_alphas, family_gammas = alphas.get(family, []), gammas.get(family, [])
+        if not family_alphas or not family_gammas or not mapping:
+            axis.text(.5, .5, "Unavailable", transform=axis.transAxes, ha="center")
+            axis.set_axis_off()
+            continue
+        matrix = _grid_matrix(mapping, family, family_alphas, family_gammas)
         image = _heatmap_panel(axis, matrix, "Same-phase" if family == "same_phase" else "Independent-white",
-                                "viridis", 0.0, 1.0, alphas, gammas)
+                                "viridis", 0.0, 1.0, family_alphas, family_gammas)
         figure.colorbar(image, ax=axis, label="Fourier coherence with base white", shrink=0.85)
-    figure.suptitle(f"Coherence with base white noise ({run_id}); white box = primary region")
-    _save_figure(figure, target)
+    figure.suptitle("Coherence with base white noise; white box = primary region")
+    _save_figure(figure, target, partial=partial)
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--alphas", default=None,
-                         help="Alphas to show in radial_psd_selected.png / theoretical_vs_empirical_psd.png: "
-                              "a 'MIN:MAX' inclusive range, a single value, or a comma-separated list, resolved "
-                              "against this run's actual alpha grid (read from its run_manifest.json -- may differ "
-                              f"per run, e.g. a finer sweep). Default: {DEFAULT_SELECTED_ALPHAS} where present.")
-    parser.add_argument("--gammas", default=None,
-                         help="Gammas to show in the same two plots: a 'MIN:MAX' inclusive range, a single value, "
-                              "or a comma-separated list, resolved against this run's actual gamma grid. "
-                              f"Default: {DEFAULT_SELECTED_GAMMAS} where present.")
+    parser.add_argument("--run-id"); parser.add_argument("--run-dir")
+    parser.add_argument("--allow-partial", action="store_true", help="Permit missing/extra/incomplete cache blocks; never permit corrupt caches")
+    parser.add_argument("--radial-bins", type=int, default=NUM_RADIAL_BINS)
+    add_display_arguments(parser, include_metrics=False)
+    # Compatibility aliases use the same priority and do not constrain validation.
+    for flag, dest in (("--alphas", "plot_alpha_range"), ("--gammas", "plot_gamma_range"),
+                       ("--same-phase-gammas", "plot_same_gamma_range"), ("--independent-gammas", "plot_independent_gamma_range")):
+        parser.add_argument(flag, dest=dest, default=argparse.SUPPRESS,
+                            help="Compatibility display alias; family-specific overrides common; default full enabled grids")
     args = parser.parse_args()
-
-    result = run_validation(args.run_id, alpha_spec=args.alphas, gamma_spec=args.gammas)
-    totals = result["hash_totals"]
-    if totals["conditions_with_hashes"] == 0:
-        hash_status = "no cached final-noise hashes found"
-    else:
-        hash_status = (f"{totals['matched']}/{totals['checked']} samples bit-exact across "
-                        f"{totals['conditions_with_hashes']} conditions; "
-                        f"{totals['numeric_matched']}/{totals['numeric_checked']} conditions numerically consistent "
-                        f"(std/l2/PSD within {NUMERIC_HASH_TOLERANCE:g}) -- SHA-256 hashes are not bit-reproducible "
-                        f"across FFT library builds, so a numeric mismatch (not a hash mismatch) is the real signal")
-    print(f"run: {result['run_id']}")
-    print(f"cache blocks: {result['num_blocks']} (integrity {'OK' if result['cache_integrity_ok'] else 'MISMATCH'})")
-    print(f"reconstructed conditions: {result['num_conditions']}")
-    print(f"final-noise hash check: {hash_status}")
-    print(f"output directory: {result['out_dir']}")
-    for name in ("noise_frequency_summary.csv", "radial_psd_selected.png", "theoretical_vs_empirical_psd.png",
-                 "equivalent_alpha_heatmap.png", "coherence_heatmap.png"):
-        print(f"  - {result['out_dir'] / name}")
+    try:
+        result = run_validation(args.run_id, run_dir=args.run_dir, options=vars(args),
+                                allow_partial=args.allow_partial, num_bins=args.radial_bins)
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
+    print(f"{result['status']}: {result['out_dir']}")
+    for name, check in result["checks"].items():
+        print(f"  {name}: {check['status']}")
+    if result["status"] == "failed":
+        raise SystemExit(1)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
