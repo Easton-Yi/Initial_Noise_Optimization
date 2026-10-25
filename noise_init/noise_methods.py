@@ -117,9 +117,14 @@ def independent_white(
     return (1.0 - gamma) ** 0.5 * pink_normalized + gamma ** 0.5 * eta
 
 
-def construct_raw_noise(batch: NoiseBatch, method: str, alpha: float, gamma: float | None,
+def construct_raw_noise(batch: NoiseBatch, method: str, alpha: float | None, gamma: float | None,
                         normalization_profile: str) -> torch.Tensor:
     """Construct a condition immediately before its shared final normalization."""
+    if method in {"antithetic", "repulsive"}:
+        from coupled_sampling import formal_noise
+        if alpha is not None or gamma is not None:
+            raise ValueError("Coupled methods require null alpha and gamma")
+        return formal_noise(batch.base_white, method, normalization_profile)
     if method == "baseline":
         return pink(batch.base_white, alpha)
     elif method == "same_phase":
@@ -130,7 +135,7 @@ def construct_raw_noise(batch: NoiseBatch, method: str, alpha: float, gamma: flo
     raise ValueError(f"Unknown noise method: {method}")
 
 
-def construct_noise(batch: NoiseBatch, method: str, alpha: float, gamma: float | None, normalization_profile: str) -> torch.Tensor:
+def construct_noise(batch: NoiseBatch, method: str, alpha: float | None, gamma: float | None, normalization_profile: str) -> torch.Tensor:
     raw = construct_raw_noise(batch, method, alpha, gamma, normalization_profile)
     # All methods receive the same final normalization. Design B additionally
     # normalizes its pink component before mixing.

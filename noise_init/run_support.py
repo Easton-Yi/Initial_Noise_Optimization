@@ -16,7 +16,7 @@ FAMILY_SECTIONS = {"baseline": "baseline", "same_phase": "same_phase_floor", "in
 @dataclass(frozen=True)
 class Condition:
     family: str
-    alpha: float
+    alpha: float | None
     gamma: float | None
 
     @property
@@ -29,6 +29,8 @@ class Condition:
 
 
 def conditions(config):
+    from coupled_sampling import COUPLED_FAMILIES, validate_config
+    validate_config(config)
     result = []
     for family, key in FAMILY_SECTIONS.items():
         section = config.get(key, {})
@@ -41,6 +43,8 @@ def conditions(config):
         if any(not math.isfinite(a) or a < 0 for a in alphas) or any(g is not None and (not math.isfinite(g) or not 0 <= g <= 1) for g in gammas):
             raise ValueError(f"Invalid {family} grid")
         result.extend(Condition(family, a, g) for a in alphas for g in gammas)
+    result.extend(Condition(family, None, None) for family in COUPLED_FAMILIES
+                  if config.get("coupled_sampling", {}).get(family, {}).get("enabled", False))
     if not result or len({c.identifier for c in result}) != len(result):
         raise ValueError("Frozen conditions are empty or contain duplicate/colliding condition IDs")
     return result
@@ -100,10 +104,15 @@ def display_selection(config, options=None):
             selected[axis + "_values"] = parse_selection(specific if specific is not None else common,
                 [getattr(c, axis) for c in available], f"{family} {axis}")
         result[family] = selected
+    for c in grid:
+        if c.family in {"antithetic", "repulsive"}:
+            result[c.family] = {"alpha_values": [None], "gamma_values": []}
     return result
 
 
 def selected_condition(c, selection):
+    if c.family in {"antithetic", "repulsive"}:
+        return True
     grid = selection.get(c.family, {})
     return c.alpha in grid.get("alpha_values", []) and (c.gamma is None or c.gamma in grid.get("gamma_values", []))
 

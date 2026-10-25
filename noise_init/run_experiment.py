@@ -91,7 +91,8 @@ def all_conditions(config: dict[str, Any], selected: str | None = None) -> list[
     if not selected: return values
     wanted = set(selected.split(",")); parsed = []
     for token in wanted:
-        if token == "white": parsed.append(Condition("baseline", 0.0, None))
+        if token in {"antithetic", "repulsive"}: parsed.append(Condition(token, None, None))
+        elif token == "white": parsed.append(Condition("baseline", 0.0, None))
         elif token.startswith("pink:"): parsed.append(Condition("baseline", float(token.split(":", 1)[1]), None))
         elif token.startswith("same:") or token.startswith("independent:"):
             family, alpha, gamma = token.split(":")
@@ -127,6 +128,11 @@ def _is_complete(sample_dir: Path, latents: torch.Tensor) -> bool:
 
 
 def generate(config: dict[str, Any], config_path: Path, blocks: list[dict[str, Any]], *, run_id: str | None, selected_conditions: str | None, force: bool, adapter: T2IModelAdapter | None = None) -> Path:
+    from coupled_sampling import enabled
+    if enabled(config):
+        from coupled_run import generate_coupled
+        return generate_coupled(config, config_path, blocks, run_id=run_id,
+                                selected_conditions=selected_conditions, force=force, adapter=adapter)
     run_dir = _run_dir(config, config_path, run_id)
     ensure_immutable_run(run_dir, config, force=force)
     block_path = run_dir / "blocks.jsonl"
@@ -211,7 +217,10 @@ def _raw_noise(batch, condition: Condition, normalization_profile: str) -> torch
 
 
 def _generation_hash(config: dict[str, Any]) -> str:
-    from io_utils import sha256_text
+    from io_utils import sha256_text, canonical_json
+    from coupled_sampling import enabled
+    if enabled(config):
+        return sha256_text(canonical_json(config["model"]), canonical_json(config["generation"]))
     return sha256_text(config["model"], config["generation"])
 
 
@@ -225,6 +234,14 @@ def _select_two_panel_display(config, alpha_range=None, gamma_range=None):
     # Compatibility helper; callers must keep the result separate from source identity.
     config["analysis"]["two_panel_display"] = display_selection(config,
         {"plot_alpha_range": alpha_range, "plot_gamma_range": gamma_range})
+
+
+def dispatch_analysis(run_dir, config):
+    from coupled_sampling import enabled
+    if enabled(config):
+        from compare_initializations import analyze_coupled_run
+        return analyze_coupled_run(run_dir)
+    return analyze_run(run_dir, config)
 
 
 def main():
@@ -247,7 +264,7 @@ def main():
                 if not args.run_id and not args.run_dir:
                     args.run_id = requested["experiment"]["name"]
             run_dir = resolve_run(args.run_id, args.run_dir, outputs_root=root)
-            print(analyze_run(run_dir, presentation_config(load_run_contract(run_dir).config, vars(args))))
+            print(dispatch_analysis(run_dir, presentation_config(load_run_contract(run_dir).config, vars(args))))
             return
         if not args.config:
             parser.error("--config is required for generation/metrics/validation")
@@ -272,7 +289,7 @@ def main():
                            selected_conditions=args.conditions, force=args.force)
         if args.stage == "all":
             evaluate_run(run_dir, config, force=args.force)
-            print(analyze_run(run_dir, presentation))
+            print(dispatch_analysis(run_dir, presentation))
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
 

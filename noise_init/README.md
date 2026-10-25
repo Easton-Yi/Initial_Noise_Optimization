@@ -260,3 +260,11 @@ MPLBACKEND=Agg OMP_NUM_THREADS=1 python3 tests/render_formal_examples.py --outpu
 ```
 
 The examples directory must not already exist. It contains synthetic finer, GenEval, single-method, no-baseline and baseline-only runs; `examples.json` lists their figure directories. The synthetic scores exercise the analysis and plotting pipeline and are not experimental model results.
+
+### Coupled initialization comparisons
+
+Antithetic pairs and first-row-preserving repulsive Gaussian coupling are available
+through the existing CLI with the two `*_geneval400_coupled.yaml` configurations.
+See the [coupled initialization runbook](docs/coupled_initialization_comparison.md)
+for separate generation/metrics commands, safe resume, explicit historical source
+selection, categorical analysis and the optional normalization diagnostic.

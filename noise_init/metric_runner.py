@@ -237,6 +237,12 @@ def evaluate_run(run_dir: str | Path, config: dict[str, Any], *, force: bool = F
     write_json(metrics_dir / "metric_manifest.json", {"complete": True,
                "metric_cache_version": METRIC_CACHE_VERSION,
                "metric_config_hash": metric_hash, "versions": versions})
+    # New-run audit only: preserve the historical metric hash and all formulas.
+    from coupled_sampling import enabled
+    if enabled(config):
+        write_json(metrics_dir / "preprocessing_audit.json", {
+            "versions": {name: _package_version(name) for name in ("torchvision", "Pillow")},
+            "metric_runner_sha256": file_hash(Path(__file__))})
 
 
 def _common(row: dict[str, Any]) -> dict[str, Any]:
