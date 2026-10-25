@@ -66,7 +66,8 @@ class MetricRunner:
         image = Image.open(image_path).convert("RGB")
         inputs = self._processor(images=image, return_tensors="pt").to(self.device)
         with torch.inference_mode():
-            vector = self._clip.get_image_features(**inputs)[0]
+            features = self._clip.get_image_features(**inputs)
+            vector = features[0] if isinstance(features, torch.Tensor) else features.pooler_output[0]
         vector = torch.nn.functional.normalize(vector, dim=0).float().cpu().numpy()
         self._embeddings[key] = vector
         return vector
@@ -76,7 +77,8 @@ class MetricRunner:
         image = self.clip_embedding(image_path)
         text = self._processor(text=[prompt], return_tensors="pt", padding=True, truncation=True).to(self.device)
         with torch.inference_mode():
-            vector = self._clip.get_text_features(**text)[0]
+            features = self._clip.get_text_features(**text)
+            vector = features[0] if isinstance(features, torch.Tensor) else features.pooler_output[0]
         vector = torch.nn.functional.normalize(vector, dim=0).float().cpu().numpy()
         return float(np.dot(image, vector))
 
