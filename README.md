@@ -7,6 +7,8 @@ This repository contains the research code for **FloorRefine**, an inference-tim
 
 The code supports two distilled few-step generators, **SDXL-Turbo** and **FLUX.2 [klein] 4B**, and evaluates every result with independent quality, text-alignment and diversity metrics.
 
+> **`main` is this project's official showcase branch.** All formal code — the noise constructions, the FloorRefine refinement, the DivGen comparison and their evaluation pipelines — is present here.
+
 ## Contents
 
 - [Research question and scope](#research-question-and-scope)
@@ -14,6 +16,7 @@ The code supports two distilled few-step generators, **SDXL-Turbo** and **FLUX.2
 - [Stage 1: White-floor pink noise initialisation](#stage-1-white-floor-pink-noise-initialisation)
 - [Stage 2: Quality-guided refinement](#stage-2-quality-guided-refinement)
 - [Data and evaluation](#data-and-evaluation)
+- [Environment setup](#environment-setup)
 - [Repository layout and where to start](#repository-layout-and-where-to-start)
 - [Supplementary demonstration notebooks](#supplementary-demonstration-notebooks)
 
@@ -153,6 +156,41 @@ The formal FloorRefine refinement is **quality-only initial-noise refinement**:
 | Noise diagnostics | Spectral validation | Construction checks and radial power spectra of the initial noise tensors themselves | Stage 1 (`noise_init/noise_validation.py`) |
 
 Higher values are better for HPSv3, CLIP cosine and MANIQA, and indicate more diversity for DreamSim, LPIPS and CLIP-Vendi. Stage 1 additionally reports quality–diversity curves, Pareto frontiers and matched-diversity quality differences. Paired same-seed changes are diagnostics: a larger change is not by itself better.
+
+## Environment setup
+
+Both `noise_init/` and `denoising_optimization/` run from the two environments configured here, built from the two requirements files kept at the repository root:
+
+- [`requirements_generation.txt`](requirements_generation.txt)
+- [`requirements_metrics.txt`](requirements_metrics.txt)
+
+**Create both environments from the repository root**, using these files directly — there is no other requirements file to install from, and no per-model or per-directory environment to set up separately:
+
+```bash
+# Run from the repository root.
+
+python3.12 -m venv .venv-generation
+.venv-generation/bin/python -m pip install -r requirements_generation.txt
+
+python3.12 -m venv .venv-metrics
+.venv-metrics/bin/python -m pip install -r requirements_metrics.txt
+```
+
+To install a specific CUDA build of PyTorch first, run for example `.venv-generation/bin/python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128` before installing the requirements file.
+
+The two environments are divided by **task, not by model**:
+
+| Environment | Purpose | How it is used |
+| --- | --- | --- |
+| `.venv-generation` | Generation and optimisation for both SDXL-Turbo and FLUX.2 [klein] | Activated for `noise_init/` generation commands; selected as the Jupyter kernel for the generation sections of every `denoising_optimization/` notebook |
+| `.venv-metrics` | Core evaluation metrics and result aggregation for both models | Activated for `noise_init/` metrics and analysis commands; selected as the Jupyter kernel for the evaluation sections of every `denoising_optimization/` notebook |
+| `.venv-maniqa` | Additional MANIQA evaluation, kept in its own environment to avoid dependency conflicts with `.venv-metrics` | Invoked by the evaluation code in `denoising_optimization/` through a separate Python process; never selected as a notebook kernel |
+
+SDXL-Turbo and FLUX.2 [klein] share the same `.venv-generation` entry point for generation, and the same `.venv-metrics` entry point for core evaluation. Neither `noise_init/` nor `denoising_optimization/` needs its own separate copy of these environments.
+
+`.venv-maniqa` is an additional, one-time setup needed only for the MANIQA evaluation in `denoising_optimization/`; it is not required for the generation and metrics pipeline in `noise_init/`. Its preparation, and how it is invoked from the notebooks, are described in [`denoising_optimization/README.md`](denoising_optimization/README.md#environments-kernels-and-the-maniqa-subprocess).
+
+If you register Jupyter kernels for `.venv-generation` and `.venv-metrics`, keep the virtual-environment directory name, the kernel's registered name (`--name`) and its display name (`--display-name`, shown in the kernel picker) distinct in your own notes — they do not have to be identical strings. See [`denoising_optimization/README.md`](denoising_optimization/README.md#environments-kernels-and-the-maniqa-subprocess) for the exact registration commands used by this project.
 
 ## Repository layout and where to start
 

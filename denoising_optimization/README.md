@@ -12,6 +12,7 @@ This directory runs the complete FloorRefine method — white-floor pink noise i
 - [FloorRefine implementation](#floorrefine-implementation)
 - [DivGen implementation](#divgen-implementation)
 - [Environments, kernels and the MANIQA subprocess](#environments-kernels-and-the-maniqa-subprocess)
+- [Common workflow for all four notebooks](#common-workflow-for-all-four-notebooks)
 - [Running the FloorRefine notebooks](#running-the-floorrefine-notebooks)
 - [Running the DivGen notebooks](#running-the-divgen-notebooks)
 - [Evaluation workflow](#evaluation-workflow)
@@ -131,53 +132,56 @@ The DivGen notebooks run the upstream DivGen optimisation under the shared gener
 
 ## Environments, kernels and the MANIQA subprocess
 
-Three kinds of Python environment are used:
+These four notebooks reuse the same two task-based environments described in the [project overview's environment setup](../README.md#environment-setup), plus one additional environment for MANIQA. The split is by **task** (generation versus evaluation), not by model: SDXL-Turbo and FLUX.2 [klein] share the same generation environment, and both models' core metrics share the same metrics environment.
 
 | Role | Environment | Used by | Key packages |
 | --- | --- | --- | --- |
-| Generation and optimisation, SDXL | e.g. `.venv-generation` (project root), registered as a Jupyter kernel | Sections 1–6 of the SDXL notebooks | `torch` (CUDA), `diffusers==0.37.1`, `transformers==4.56.2`, `accelerate`, `hpsv2`, `timm`, `pandas`, `matplotlib`, `ipykernel` |
-| Generation and optimisation, FLUX | a separate environment, e.g. `.venv-flux`, registered as a Jupyter kernel | Sections 1–6 of the FLUX notebooks | as above but `transformers==4.57.6`; the GPU must support BF16 |
-| Core metrics | `.venv-metrics` (project root) | Sections 7–14 (the notebook kernel) and the core metric worker (`CORE_PYTHON`) | `hpsv3==1.0.0`, `transformers==4.45.2`, `lpips`, `dreamsim`, `vendi-score`, `pandas`, `ipykernel` |
-| MANIQA | `.venv-maniqa` (project root) | MANIQA worker only (`MANIQA_PYTHON`); never selected as a kernel | `torch==2.11.0`, `torchvision==0.26.0`, `pyiqa==0.1.16` |
+| Generation and optimisation (SDXL and FLUX) | `.venv-generation` (repository root), registered as a Jupyter kernel | Sections 1–6 of all four notebooks | `torch` (CUDA), `diffusers==0.37.1`, `transformers==4.56.2`, `accelerate`, `hpsv2`, `timm`, `pandas`, `matplotlib`, `ipykernel` |
+| Core metrics (SDXL and FLUX) | `.venv-metrics` (repository root), registered as a Jupyter kernel | Sections 7–14 of all four notebooks, and the core metric worker (`CORE_PYTHON`) | `hpsv3==1.0.0`, `transformers==4.45.2`, `lpips`, `dreamsim`, `vendi-score`, `pandas`, `ipykernel` |
+| MANIQA (additional evaluation) | `.venv-maniqa` (repository root) | MANIQA worker only (`MANIQA_PYTHON`); invoked by code in the metrics kernel, never selected as a kernel itself | `torch==2.11.0`, `torchvision==0.26.0`, `pyiqa==0.1.16` |
 
-The separation resolves real pin conflicts: HPSv3 requires an older `transformers` than the FLUX.2 [klein] pipeline, HPSv2 belongs to the generation stage only, and `pyiqa` pulls its own dependency versions.
+Only `.venv-generation` and `.venv-metrics` need to be selected as notebook kernels. `.venv-maniqa` is called automatically by the evaluation code in Section 10 (see [How the metric workers run](#how-the-metric-workers-run) below); it is never selected from Jupyter's kernel picker.
 
-**Creating the environments** (adjust the CUDA wheel index to your machine):
+The task-based split resolves real pin conflicts: HPSv3 requires an older `transformers` than the generation stack, HPSv2 belongs to generation only, and `pyiqa` pulls its own dependency versions, kept out of both `.venv-generation` and `.venv-metrics`.
+
+**Creating the environments** (adjust the CUDA wheel index to your machine). `.venv-generation` and `.venv-metrics` are the same two environments built in the [project overview](../README.md#environment-setup) from the root `requirements_generation.txt` and `requirements_metrics.txt`; the extra packages below (`hpsv2`, `pandas`, `ipykernel`, …) are needed only for these notebooks and are not part of the `noise_init/` requirements files:
 
 ```bash
 cd /path/to/Initial_Noise_Optimization
 
-# SDXL generation (extends the Stage 1 generation environment)
+# Generation and optimisation, shared by SDXL and FLUX.
 python3.12 -m venv .venv-generation
-.venv-generation/bin/python -m pip install -r noise_init/requirements_generation.txt
+.venv-generation/bin/python -m pip install -r requirements_generation.txt
 .venv-generation/bin/python -m pip install hpsv2 timm pandas safetensors ipykernel
 .venv-generation/bin/python -m ipykernel install --user --name venv-generation --display-name ".venv-generation"
 
-# FLUX generation
-python3.12 -m venv .venv-flux
-.venv-flux/bin/python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-.venv-flux/bin/python -m pip install "diffusers==0.37.1" "transformers==4.57.6" accelerate safetensors pillow numpy pandas matplotlib hpsv2 timm ipykernel
-.venv-flux/bin/python -m ipykernel install --user --name venv-flux --display-name ".venv-flux"
-
-# Core metrics (see noise_init/README.md); register it as the metrics kernel
+# Core metrics, shared by SDXL and FLUX (see noise_init/README.md for the base install).
 python3.12 -m venv .venv-metrics
-.venv-metrics/bin/python -m pip install -r noise_init/requirements_metrics.txt
+.venv-metrics/bin/python -m pip install -r requirements_metrics.txt
 .venv-metrics/bin/python -m pip install pandas ipykernel
 .venv-metrics/bin/python -m ipykernel install --user --name venv-metrics --display-name ".venv-metrics"
+```
 
-# MANIQA (no kernel registration)
-python3.12 -m venv .venv-maniqa
-.venv-maniqa/bin/python -m pip install --upgrade pip
-.venv-maniqa/bin/python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-.venv-maniqa/bin/python -m pip install "pyiqa==0.1.16"
+**MANIQA is prepared separately, once, following the instructions printed inside the notebooks.** The two FloorRefine notebooks (`FloorRefine-SDXL-GenEval50.ipynb` and `FloorRefine-FLUX2-Klein-4B-4step-GenEval50-GPU-Resident.ipynb`) each contain a "One-time MANIQA setup" note under their Section 7 ("Select the images for evaluation"), with this exact terminal command:
+
+```bash
+cd /workspace/Initial_Noise_Optimization && \
+python3.12 -m venv .venv-maniqa && \
+.venv-maniqa/bin/python -m pip install --upgrade pip && \
+.venv-maniqa/bin/python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128 && \
+.venv-maniqa/bin/python -m pip install "pyiqa==0.1.16" && \
 .venv-maniqa/bin/python -m pip check
 ```
+
+Replace `/workspace/Initial_Noise_Optimization` with your own repository path. Run this once in a terminal, outside Jupyter; no MANIQA kernel registration is needed, and **running this setup does not run inside any notebook cell** — it is a prerequisite that must exist before the evaluation sections of any of the four notebooks are run with `RUN_MANIQA = True`. The two `DivGen-*.ipynb` notebooks reference the same `.venv-maniqa` and `MANIQA_PYTHON` variable (see [Paths and switches](#paths-and-switches) below) but do not repeat the setup instructions; prepare `.venv-maniqa` once (from either FloorRefine notebook's instructions, or directly from the command above) and all four notebooks reuse it. Preparing the environment is a one-time, prerequisite action; it is separate from, and does not happen as a side effect of, the "automatic" invocation described in [How the metric workers run](#how-the-metric-workers-run) — that invocation only *calls* the already-prepared environment, it does not create or install it.
 
 **HPSv2 preparation.** Section 1 of each notebook patches the installed `hpsv2` package once: it removes an unused `from turtle import forward` line from its bundled OpenCLIP code (keeping a `.py.bak` backup) and downloads the CLIP BPE vocabulary file if it is missing, verifying its SHA-256. Run these cells in the generation kernel. The HPSv2, HPSv2.1, DINOv2 and generator checkpoints are downloaded from Hugging Face on first use.
 
 **Required project files.** The notebooks locate the project root by searching upward from the working directory (or from `PROJECT_ROOT` if it is set) for `noise_init/noise_methods.py`, `noise_init/metric_runner.py` and the two loader modules `pc_specific_psd/_compat_common.py` and `pc_specific_psd/compat_metrics.py`. These loaders import `noise_methods` and `MetricRunner` from `noise_init/`; the evaluation worker also imports `MetricRunner` through `pc_specific_psd.compat_metrics`. Both modules, together with `pc_specific_psd/__init__.py`, must be present for generation and evaluation to run.
 
-**Paths and switches** (set in the configuration cells):
+### Paths and switches
+
+Set in the configuration cells:
 
 | Variable | Where | Meaning |
 | --- | --- | --- |
@@ -192,7 +196,9 @@ python3.12 -m venv .venv-maniqa
 | `CORE_METRICS` | Section 7 | `['clip', 'hpsv3', 'dreamsim', 'lpips', 'vendi_clip']` |
 | `REFERENCE_METRIC_MANIFEST` | Section 7 | Optional `metric_manifest.json` from another evaluation, compared in Section 11 |
 
-**How the metric workers run.** Section 8 writes the embedded worker source (`METRICS_WORKER_SOURCE`) to `<run>/<EVALUATION_TAG>/isolated_metrics_worker.py`. Sections 9 and 10 call `execute_metric(metric, python, output)`, which starts the worker as a **separate process** with `subprocess.Popen`, using the selected interpreter:
+### How the metric workers run
+
+Section 8 writes the embedded worker source (`METRICS_WORKER_SOURCE`) to `<run>/<EVALUATION_TAG>/isolated_metrics_worker.py`. Sections 9 and 10 call `execute_metric(metric, python, output)`, which starts the worker as a **separate process** with `subprocess.Popen`, using the selected interpreter:
 
 ```text
 <python> <EVAL_ROOT>/isolated_metrics_worker.py --run-dir <RUN_DIR> --project-root <PROJECT_ROOT> \
@@ -207,9 +213,50 @@ python3.12 -m venv .venv-maniqa
 
 **GPU memory.** Generation releases its models at the end of `generate_batch()`, but the kernel process keeps its CUDA context. Shut down the generation kernel before starting evaluation so that only one set of models occupies the GPU.
 
+## Common workflow for all four notebooks
+
+All four notebooks (`FloorRefine-SDXL-GenEval50.ipynb`, `FloorRefine-FLUX2-Klein-4B-4step-GenEval50-GPU-Resident.ipynb`, `DivGen-SDXL-GenEval50.ipynb`, `DivGen-FLUX2-Klein-4B-4step-GenEval50-GPU-Resident.ipynb`) follow the same five-step sequence, detailed per notebook in [Running the FloorRefine notebooks](#running-the-floorrefine-notebooks) and [Running the DivGen notebooks](#running-the-divgen-notebooks) below.
+
+**Step 1 — Prepare the environments.**
+
+- Build `.venv-generation` from the repository root's `requirements_generation.txt` (see [Environments, kernels and the MANIQA subprocess](#environments-kernels-and-the-maniqa-subprocess) above).
+- Build `.venv-metrics` from the repository root's `requirements_metrics.txt`.
+- If you plan to run the evaluation with `RUN_MANIQA = True`, prepare `.venv-maniqa` once beforehand by following the "One-time MANIQA setup" instructions printed in Section 7 of either FloorRefine notebook (see [Environments, kernels and the MANIQA subprocess](#environments-kernels-and-the-maniqa-subprocess)).
+- Confirm that `CORE_PYTHON` and `MANIQA_PYTHON` (set in Section 7) point at the correct interpreters: `PROJECT_ROOT/.venv-metrics/bin/python` and `PROJECT_ROOT/.venv-maniqa/bin/python`.
+
+**Step 2 — Generate and optimise.**
+
+- Open the notebook for the model and method you want to run.
+- Select the `.venv-generation` kernel.
+- Set the experiment parameters in Section 2, then run the generation and optimisation sections (Sections 1–6).
+- Check the printed progress, the saved images and `manifest.json`'s `"status": "complete"` to confirm the run finished.
+
+This step uses the same `.venv-generation` environment for both SDXL and FLUX; there is no separate generation environment to switch to for FLUX.
+
+**Step 3 — Run core metrics.**
+
+- Switch to the `.venv-metrics` kernel (a kernel switch restarts the Python process, so nothing from the generation kernel's memory carries over).
+- Start from Section 7 ("Select the images for evaluation" / "Select saved images for evaluation"), which re-imports everything evaluation needs, re-resolves `PROJECT_ROOT`, and verifies the selected run.
+- Run the configuration cell in Section 7 to select the saved generation run (`RUN_TO_SCORE`) and set `RUN_MANIQA` and `EVALUATION_TAG`.
+- Run Section 8 (writes the evaluation worker) and Section 9 (runs the five core metrics).
+
+**Step 4 — Run additional MANIQA evaluation.**
+
+- Stay on the `.venv-metrics` kernel; do not switch kernels for this step.
+- Run Section 10 ("Compute MANIQA"). If `RUN_MANIQA = True`, the cell's code starts the MANIQA worker as a **separate subprocess**, launched with `subprocess.Popen` using the `MANIQA_PYTHON` interpreter inside the already-prepared `.venv-maniqa` environment. Running this cell is what triggers that subprocess — it does not start on its own if the cell is skipped.
+- You do not select a MANIQA kernel at any point; the notebook process stays on `.venv-metrics` throughout, and only the child process it launches runs under `.venv-maniqa`.
+- MANIQA's dependencies (`pyiqa`, its pinned `torch`/`torchvision`) stay inside `.venv-maniqa` and are never installed into `.venv-metrics`.
+- To skip MANIQA, set `RUN_MANIQA = False` before running Section 7; Section 10 then prints a message and does nothing, and only core metrics are evaluated.
+
+**Step 5 — Combine and inspect results.**
+
+- Run Section 12 ("Combine the results"), which merges the core and (if enabled) MANIQA tables into `<EVAL_ROOT>/combined_with_maniqa/` or `<EVAL_ROOT>/combined_core/`.
+- Run Section 13 ("Summarise") to produce the prompt-level statistics and Q–D plots.
+- Check `metric_status.csv` in the merged output: every requested metric should show `ok`. See [Metrics and outputs of the evaluation](#metrics-and-outputs-of-the-evaluation) and [Output map](#output-map) for exactly where these files are written and which ones matter most.
+
 ## Running the FloorRefine notebooks
 
-1. **Open** the notebook from `denoising_optimization/` and select the generation kernel (`.venv-generation` for SDXL, `.venv-flux` for FLUX).
+1. **Open** the notebook from `denoising_optimization/` and select the `.venv-generation` kernel (shared by SDXL and FLUX; see [Environments, kernels and the MANIQA subprocess](#environments-kernels-and-the-maniqa-subprocess)).
 2. **Section 1:** run the HPSv2 preparation and import cells.
 3. **Section 2:** review the configuration cell. Settings that may be changed:
    - `CACHE_DIR` — set to your model cache.
@@ -225,11 +272,11 @@ python3.12 -m venv .venv-maniqa
 
 Default run directories: `outputs/initial_noise_optimize_geneval50/geneval50_quality20_sdxl1step_v1/` (SDXL, one step) and `outputs/initial_noise_optimize_geneval50_flux2/geneval50_quality20_flux2_klein4b_4step_resident_bf16_v1/` (FLUX).
 
-**FLUX-specific behaviour.** The FLUX notebook requires `diffusers==0.37.1`, a CUDA GPU with BF16 support, and the distilled `black-forest-labs/FLUX.2-klein-4B` checkpoint (it checks all three). All selected prompts are encoded once with the Qwen3 text encoder, which is then released; the transformer, VAE and HPSv2 stay resident on the GPU during optimisation, with block-level gradient checkpointing and no CPU offload. Run a one-prompt trial (`PROMPT_LIMIT = 1`) before the full batch to confirm that GPU memory is sufficient.
+**FLUX-specific behaviour.** The FLUX notebook runs on the same `.venv-generation` kernel as SDXL; it additionally requires a CUDA GPU with BF16 support and the distilled `black-forest-labs/FLUX.2-klein-4B` checkpoint (the notebook checks both at load time). All selected prompts are encoded once with the Qwen3 text encoder, which is then released; the transformer, VAE and HPSv2 stay resident on the GPU during optimisation, with block-level gradient checkpointing and no CPU offload. Run a one-prompt trial (`PROMPT_LIMIT = 1`) before the full batch to confirm that GPU memory is sufficient.
 
 ## Running the DivGen notebooks
 
-1. **Open** the notebook from `denoising_optimization/` with the generation kernel (`.venv-generation` for SDXL, `.venv-flux` for FLUX).
+1. **Open** the notebook from `denoising_optimization/` and select the `.venv-generation` kernel (the same environment used for the SDXL and FLUX FloorRefine notebooks).
 2. **Section 1:** run the HPSv2 preparation cell.
 3. **Section 2:** run the configuration cell and the `GENEVAL50` cell. Settings that may be changed: `PROMPT_LIMIT` (`1` for a separate trial, `None` for all 50 prompts), `NUM_STEPS` (SDXL only: `1` or `4`), `RUN_NAME`, and `LOG_EVERY`. Keep `INIT_CONFIGS`, `N_EVALUATIONS`, `SAVE_BUDGETS`, the loss weights, `LR`, `MOMENTUM` and `GRAD_CLIP` unchanged for reproduction.
 4. **Section 3:** load the embedded upstream source and the shared generation protocol.

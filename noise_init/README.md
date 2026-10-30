@@ -61,26 +61,28 @@ All entry points are run from the `noise_init/` directory.
 
 ## Environments
 
-Generation and metric evaluation use **two separate Python environments**. The official HPSv3 package (`hpsv3==1.0.0`) requires `transformers==4.45.2`, while the FLUX.2 [klein] pipeline in `diffusers==0.37.1` needs a newer `transformers`. Keeping the stages separate lets both pins hold.
+This directory uses the same two environments described in the [project overview's environment setup](../README.md#environment-setup), configured once from the repository root. Generation and metric evaluation are kept in **two separate Python environments**: the official HPSv3 package (`hpsv3==1.0.0`) requires `transformers==4.45.2`, while the FLUX.2 [klein] pipeline in `diffusers==0.37.1` needs a newer `transformers`. Keeping the stages separate lets both pins hold.
 
-| Environment | Requirements file | Used for |
+| Environment | Requirements file (repository root) | Used for |
 | --- | --- | --- |
-| `.venv-generation` (project root) | [`requirements_generation.txt`](requirements_generation.txt) | `validate`, `generate` |
-| `.venv-metrics` (project root) | [`requirements_metrics.txt`](requirements_metrics.txt) | `metrics`, `analyze`, plotting, grids, noise validation, tests |
+| `.venv-generation` | [`requirements_generation.txt`](../requirements_generation.txt) | `validate`, `generate` |
+| `.venv-metrics` | [`requirements_metrics.txt`](../requirements_metrics.txt) | `metrics`, `analyze`, plotting, grids, noise validation, tests |
+
+`.venv-generation` and `.venv-metrics` are shared with `denoising_optimization/`; this directory's normal generation, metrics and analysis workflow does not need `.venv-maniqa` (see the [project overview](../README.md#environment-setup)).
 
 Both files pin Python 3.12-compatible packages including `torch==2.11.0`, `torchvision==0.26.0`, `diffusers==0.37.1`, `lpips==0.1.4`, `dreamsim==0.2.1` and `vendi-score`. The generation file pins `transformers==4.56.2`; the metrics file pins `transformers==4.45.2` and `hpsv3==1.0.0`. Choose the CUDA build of PyTorch that matches your GPU and driver.
 
 ```bash
-# From the project root (the directory containing noise_init/)
+# Run from the repository root (the directory containing noise_init/).
 cd /path/to/Initial_Noise_Optimization
 
 python3.12 -m venv .venv-generation
 .venv-generation/bin/python -m pip install --upgrade pip
-.venv-generation/bin/python -m pip install -r noise_init/requirements_generation.txt
+.venv-generation/bin/python -m pip install -r requirements_generation.txt
 
 python3.12 -m venv .venv-metrics
 .venv-metrics/bin/python -m pip install --upgrade pip
-.venv-metrics/bin/python -m pip install -r noise_init/requirements_metrics.txt
+.venv-metrics/bin/python -m pip install -r requirements_metrics.txt
 ```
 
 To install a specific CUDA wheel of PyTorch first, run for example `.venv-metrics/bin/python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128` before installing the requirements file.
