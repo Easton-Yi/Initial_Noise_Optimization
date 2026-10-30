@@ -111,11 +111,18 @@ def resolve_recorded_image(run_dir: Path, row: dict[str, Any]) -> Path:
     return recorded
 
 
-def validate_generation_records(run_dir: str | Path, *, require_complete: bool) -> tuple[RunContract, list[dict[str, Any]], dict[tuple[str, str], list[dict[str, Any]]]]:
+def validate_generation_records(run_dir: str | Path, *, require_complete: bool, condition_ids=None) -> tuple[RunContract, list[dict[str, Any]], dict[tuple[str, str], list[dict[str, Any]]]]:
     """Validate all present galleries; optionally require the frozen Cartesian product."""
     contract = load_run_contract(run_dir)
+    if condition_ids is not None:
+        from dataclasses import replace
+        if not condition_ids or not set(condition_ids) <= set(contract.condition_ids):
+            raise RuntimeError("Selected conditions must belong to the frozen run")
+        contract = replace(contract, condition_ids=tuple(condition_ids))
     expected_groups = contract.expected_groups
     rows = load_generation_records(run_dir)
+    if condition_ids is not None:
+        rows = [r for r in rows if r.get("condition_id") in condition_ids]
     if not rows:
         raise RuntimeError("No generated sample records found")
 
@@ -171,6 +178,10 @@ def validate_generation_records(run_dir: str | Path, *, require_complete: bool) 
         issues.append(f"mixed model_id values: {sorted(model_ids)[:4]}")
     if issues:
         raise RuntimeError("Generation integrity check failed: " + "; ".join(issues))
+    from coupled_sampling import enabled
+    if enabled(contract.config):
+        from coupled_run import validate_saved_groups
+        validate_saved_groups(Path(run_dir), contract, groups)
     return contract, rows, groups
 
 
@@ -187,10 +198,10 @@ def enabled_metric_names(config: dict[str, Any]) -> tuple[tuple[str, ...], tuple
     return quality, pairwise, group_only
 
 
-def validate_analysis_inputs(run_dir: str | Path) -> RunContract:
+def validate_analysis_inputs(run_dir: str | Path, *, condition_ids=None) -> RunContract:
     """Require a complete frozen run and exact, prompt-aware metric coverage."""
     run_dir = Path(run_dir)
-    contract, generation_rows, groups = validate_generation_records(run_dir, require_complete=True)
+    contract, generation_rows, groups = validate_generation_records(run_dir, require_complete=True, condition_ids=condition_ids)
     quality, pairwise, group_only = enabled_metric_names(contract.config)
     manifest_path = run_dir / "metrics" / "metric_manifest.json"
     if not manifest_path.exists():
@@ -208,6 +219,9 @@ def validate_analysis_inputs(run_dir: str | Path) -> RunContract:
     per_image = _read_csv(run_dir / "metrics" / "per_image.csv")
     per_pair = _read_csv(run_dir / "metrics" / "per_pair.csv")
     per_group = _read_csv(run_dir / "metrics" / "per_group.csv")
+    if condition_ids is not None:
+        per_image, per_pair, per_group = ([r for r in rows if r.get("condition_id") in condition_ids]
+                                        for rows in (per_image, per_pair, per_group))
     issues: list[str] = []
     _validate_per_image(per_image, generation_by_key, quality, str(metric_hash), issues)
     _validate_per_pair(per_pair, groups, pairwise, str(metric_hash), contract.base_indices, issues)
@@ -325,6 +339,16 @@ def _add_issue(issues: list[str], label: str, examples: list[str]) -> None:
 def validate_condition_metadata(row, *, context):
     try:
         family = row.get("family") or row["condition_id"].split("/")[0]
+        if family in {"antithetic", "repulsive"}:
+            if not {"alpha", "gamma"} <= set(row):
+                raise ValueError("Coupled metadata must include null alpha/gamma fields")
+            if row.get("alpha") not in (None, "") or row.get("gamma") not in (None, ""):
+                raise ValueError("Coupled methods must have null alpha/gamma")
+            if row["condition_id"] != condition_id(family, None, None):
+                raise ValueError("Coupled condition ID mismatch")
+            if row.get("method") != family or row.get("normalization_profile") != "none":
+                raise ValueError("Contradictory coupled method/normalization metadata")
+            return
         alpha = float(row["alpha"])
         gamma = None if family == "baseline" else float(row["gamma"])
         if family not in {"baseline", "same_phase", "independent_white"} or not math.isfinite(alpha) or alpha < 0:

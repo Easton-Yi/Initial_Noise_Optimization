@@ -1,0 +1,290 @@
+[
+  {
+    "dtype": "float16",
+    "k": 1,
+    "strength": 0.0,
+    "hash": "50d26eb5cb7f79f0ea069b51dc89c22cdba4bfba4aa36ded9950851b3a89baed"
+  },
+  {
+    "dtype": "float16",
+    "k": 1,
+    "strength": 0.3,
+    "hash": "50d26eb5cb7f79f0ea069b51dc89c22cdba4bfba4aa36ded9950851b3a89baed"
+  },
+  {
+    "dtype": "float16",
+    "k": 1,
+    "strength": 1.0,
+    "hash": "50d26eb5cb7f79f0ea069b51dc89c22cdba4bfba4aa36ded9950851b3a89baed"
+  },
+  {
+    "dtype": "float16",
+    "k": 2,
+    "strength": 0.0,
+    "hash": "c4c5af489811a4a9975359f290be29937ba5aa6fddd1110103ef68f3d15660f2"
+  },
+  {
+    "dtype": "float16",
+    "k": 2,
+    "strength": 0.3,
+    "hash": "50b21c26a263e48184483b4be0904e057c98076f7479c33c53c02272f63e6e8e"
+  },
+  {
+    "dtype": "float16",
+    "k": 2,
+    "strength": 1.0,
+    "hash": "a5ccbf33a81f5e8ed51c80e9ecc84425d358968177b37df6f8a85a212e68c0e5"
+  },
+  {
+    "dtype": "float16",
+    "k": 4,
+    "strength": 0.0,
+    "hash": "6b6394cb9b382b080b5e78694cd1e644ef032aefe929a6b9db80555737722e3c"
+  },
+  {
+    "dtype": "float16",
+    "k": 4,
+    "strength": 0.3,
+    "hash": "2f07a692227564d47faf40ce048b49677bffc3136a7fa3a23161999e607ca7b8"
+  },
+  {
+    "dtype": "float16",
+    "k": 4,
+    "strength": 1.0,
+    "hash": "5f381b6045b92aad2841885899b8409a687ccec8b326c759bb93f5059b354139"
+  },
+  {
+    "dtype": "float16",
+    "k": 7,
+    "strength": 0.0,
+    "hash": "892f83864f16c1aa5b0f66512df616e3cc1d858816842e3e10539112aea8eb74"
+  },
+  {
+    "dtype": "float16",
+    "k": 7,
+    "strength": 0.3,
+    "hash": "4a820376e324d2c25166f37f5e046869a1f3382252d282485a205b9f13e75a92"
+  },
+  {
+    "dtype": "float16",
+    "k": 7,
+    "strength": 1.0,
+    "hash": "2550e212edf27c8f8b58fd6839fe71f461bd00162a7f2f92d12c6c5127298688"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 1,
+    "strength": 0.0,
+    "hash": "af5a96a6442b9bb06ba8b9731d1aa3c840fdaded09c669c94c79f6e4470ca008"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 1,
+    "strength": 0.3,
+    "hash": "af5a96a6442b9bb06ba8b9731d1aa3c840fdaded09c669c94c79f6e4470ca008"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 1,
+    "strength": 1.0,
+    "hash": "af5a96a6442b9bb06ba8b9731d1aa3c840fdaded09c669c94c79f6e4470ca008"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 2,
+    "strength": 0.0,
+    "hash": "ff493fa1eebd02068521fd1c3d5ba033996c73e27e87f62a00eddbf01d34a5f2"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 2,
+    "strength": 0.3,
+    "hash": "936bbfd27aee8284b795bef0f026affb456728a3480858763f8fa81114576da5"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 2,
+    "strength": 1.0,
+    "hash": "09a360cbee5f2940c7453ce1a2078e88a685b95b588d0fbdb7a0697e50bd5dba"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 4,
+    "strength": 0.0,
+    "hash": "169b9f1ad9fc4820902ae17e283efb2485d4f6ea02b18e3b6472d4f5076a73af"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 4,
+    "strength": 0.3,
+    "hash": "e52e326bf66eea8cdbb26f4688cfbd0c689d814e86a59da780910f9a042c1362"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 4,
+    "strength": 1.0,
+    "hash": "89000934faa59596d600f633d47db0565cb7fce86348a31388ad0109b6d18d68"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 7,
+    "strength": 0.0,
+    "hash": "a2d005ad97f796ad25ac8be6c92e1088a657d71a7c18b8fc2f856d51e3fd017b"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 7,
+    "strength": 0.3,
+    "hash": "194856883ee2be5d455e72e56e5b2c5fd5befa2a7a028f24435e81b575d015d9"
+  },
+  {
+    "dtype": "bfloat16",
+    "k": 7,
+    "strength": 1.0,
+    "hash": "4d4d1ea8add9988b048c7780eee79b2bda6f7652230db160bbbfb5c16e4b7197"
+  },
+  {
+    "dtype": "float32",
+    "k": 1,
+    "strength": 0.0,
+    "hash": "8410ded85e70a3c9db20204a92fb0234dc470640dfcf1c30f79efb6289c3c8ab"
+  },
+  {
+    "dtype": "float32",
+    "k": 1,
+    "strength": 0.3,
+    "hash": "8410ded85e70a3c9db20204a92fb0234dc470640dfcf1c30f79efb6289c3c8ab"
+  },
+  {
+    "dtype": "float32",
+    "k": 1,
+    "strength": 1.0,
+    "hash": "8410ded85e70a3c9db20204a92fb0234dc470640dfcf1c30f79efb6289c3c8ab"
+  },
+  {
+    "dtype": "float32",
+    "k": 2,
+    "strength": 0.0,
+    "hash": "7782cd07240a8a85a30a48a2707205c3626f6a415b754cd010d1f25ac619036c"
+  },
+  {
+    "dtype": "float32",
+    "k": 2,
+    "strength": 0.3,
+    "hash": "37e09bfd53c7c8db266d5caac56f6b4934966ed17fb8620f15f26c05a5dbceca"
+  },
+  {
+    "dtype": "float32",
+    "k": 2,
+    "strength": 1.0,
+    "hash": "005fdd1f7c8ee0d1894518dbea3a0065371bd786338897c727f3f3af1de03755"
+  },
+  {
+    "dtype": "float32",
+    "k": 4,
+    "strength": 0.0,
+    "hash": "3d43b9da60755c3639d3abc15bd05dbb63e7f8341d0d6f08fe98d888885e93aa"
+  },
+  {
+    "dtype": "float32",
+    "k": 4,
+    "strength": 0.3,
+    "hash": "cf206b4756cb5095ddb8e969edc723937d1cc7eaa5fde1ccc99f42b145f9a579"
+  },
+  {
+    "dtype": "float32",
+    "k": 4,
+    "strength": 1.0,
+    "hash": "22b75685d2491e51de929c215f2299955a2c7d8179aae70876acd9821dd3cc3f"
+  },
+  {
+    "dtype": "float32",
+    "k": 7,
+    "strength": 0.0,
+    "hash": "41422c5cc3702d0124076fef73f9b074da30c1600c210af971a117492d90db62"
+  },
+  {
+    "dtype": "float32",
+    "k": 7,
+    "strength": 0.3,
+    "hash": "3643f63cddc410ce7a207b84edfa56f9ff964b2f43d11dcbadd5315eb74e5d77"
+  },
+  {
+    "dtype": "float32",
+    "k": 7,
+    "strength": 1.0,
+    "hash": "a62ad98bbdc2438e2184a8b69af31388cdff1925b581704124753a4b0ae0733f"
+  },
+  {
+    "dtype": "float64",
+    "k": 1,
+    "strength": 0.0,
+    "hash": "e4e76ed5dec5cfc0aa4b9425d7895e9113298279a9ff634d4a1e1e82983c52ef"
+  },
+  {
+    "dtype": "float64",
+    "k": 1,
+    "strength": 0.3,
+    "hash": "e4e76ed5dec5cfc0aa4b9425d7895e9113298279a9ff634d4a1e1e82983c52ef"
+  },
+  {
+    "dtype": "float64",
+    "k": 1,
+    "strength": 1.0,
+    "hash": "e4e76ed5dec5cfc0aa4b9425d7895e9113298279a9ff634d4a1e1e82983c52ef"
+  },
+  {
+    "dtype": "float64",
+    "k": 2,
+    "strength": 0.0,
+    "hash": "11e093a16b10cb273497e1cd75b1a6883754d5338d3b7b5d99eecca928014ba4"
+  },
+  {
+    "dtype": "float64",
+    "k": 2,
+    "strength": 0.3,
+    "hash": "1ee3485d78a5a2ef984d9efc268d410cb048baac9d576def6b094a6218e1a208"
+  },
+  {
+    "dtype": "float64",
+    "k": 2,
+    "strength": 1.0,
+    "hash": "a12a087c37b47e123afad4211ed9d620d13295fd36ff2c0ac0be8cfecdbdb8ed"
+  },
+  {
+    "dtype": "float64",
+    "k": 4,
+    "strength": 0.0,
+    "hash": "0b2def3509ca29e7da8ed034bd1d2191dbcd9ac08fdfecee82baa0be419b6c7a"
+  },
+  {
+    "dtype": "float64",
+    "k": 4,
+    "strength": 0.3,
+    "hash": "447ac5cd6110c7c39d55f8c9267fe299777dbe3dc2bf69aa1c533303d0acff17"
+  },
+  {
+    "dtype": "float64",
+    "k": 4,
+    "strength": 1.0,
+    "hash": "3dc8a29a266d99013ad9d2d3af3693208ad40769a9571a5f71c8b8ddba18049e"
+  },
+  {
+    "dtype": "float64",
+    "k": 7,
+    "strength": 0.0,
+    "hash": "2405f942dc3bfa11cfb8abcbc85c874545ec83de9544f2609c83dd6a83197a0d"
+  },
+  {
+    "dtype": "float64",
+    "k": 7,
+    "strength": 0.3,
+    "hash": "8f910ec6b7786e9c8dfb38c339831df611bdeaea7b3a69e18a01a5074f861509"
+  },
+  {
+    "dtype": "float64",
+    "k": 7,
+    "strength": 1.0,
+    "hash": "4612b28561ee103d99be5304d1d83b459c3b466ca7b0bb8e35acbfbd86f9d478"
+  }
+]

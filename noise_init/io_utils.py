@@ -75,7 +75,11 @@ def alpha_token(value: float) -> str:
     return f"{value:.8g}".replace("-", "m").replace(".", "p")
 
 
-def condition_id(family: str, alpha: float, gamma: float | None = None) -> str:
+def condition_id(family: str, alpha: float | None, gamma: float | None = None) -> str:
+    if family in {"antithetic", "repulsive"}:
+        if alpha is not None or gamma is not None:
+            raise ValueError("Coupled conditions require null alpha and gamma")
+        return {"antithetic": "antithetic/pairs_01_23", "repulsive": "repulsive/strength_1"}[family]
     if family == "baseline":
         return f"baseline/alpha_{alpha_token(alpha)}"
     return f"{family}/alpha_{alpha_token(alpha)}_gamma_{alpha_token(float(gamma))}"
